@@ -7,21 +7,20 @@ Controller (which rejects oversized external blocklists).
 ## How it works
 
 1. Every URL in `BLOCKLIST_URLS` is fetched on startup and then periodically
-   (`REFRESH_INTERVAL`). Formats are detected by file extension, content type,
-   or content sniffing: **txt** (plain, hosts-file, and adblock-style lines),
-   **JSON** (array of strings, or any object containing string arrays),
-   **YAML**, and **TOML**.
+   (`REFRESH_INTERVAL`). Optional category tags prefix each URL
+   (`threat:https://…`); untagged sources land in `default`. Formats are
+   detected by extension, content type, or sniffing: **txt** (plain, hosts,
+   adblock), **JSON**, **YAML**, and **TOML**. Line comments (`#`, `//`,
+   `--`, `;`) are stripped before parse; CIDRs like `10.0.0.0/8` are kept
+   (a single `/` is never a comment).
 2. Entries are normalized (lowercased, wildcards/schemes/hosts prefixes
    stripped, CIDRs masked) and classified as **domains**, **IPv4**, or
    **IPv6** (IPv4-mapped IPv6 addresses like `::ffff:a.b.c.d` count as IPv4).
-3. Entries are deduplicated **across all source lists** per class, sorted, and
-   split into separate domain / IPv4 / IPv6 chunk streams of at most
-   `CHUNK_SIZE` entries each. Domains sort by label from the TLD leftward
-   (`cloudflare.com` before `google.com` before `mail.google.com`; `.com`
-   before `.nyc`). IPv4 and IPv6 sort numerically (128-bit for IPv6, so
-   `2006::1` before `2006:0:1::1` before `2006:1::1`; compressed forms like
-   `2006:0::1` normalize to `2006::1`). Chunk count is purely a function of
-   unique-entry count vs. chunk size — there are no fixed endpoints.
+3. Entries are deduplicated **across all source lists** per class. Each
+   unique entry is assigned to **one** category (first source wins) and also
+   appears in the global **all** feed. Within each feed, entries are sorted
+   and split into domain / IPv4 / IPv6 chunk streams of at most `CHUNK_SIZE`.
+   Domains sort by label from the TLD leftward; IPv4/IPv6 sort numerically.
 4. A failed source never takes the service down: other sources still apply,
    and a refresh yielding zero entries keeps the previous snapshot.
 
@@ -29,11 +28,12 @@ Controller (which rejects oversized external blocklists).
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /` | Plain-text index of all chunk URLs (generated from the request's public origin) |
-| `GET /lists/dns-<n>.txt` | Domain chunk `n` (1-based), one entry per line |
-| `GET /lists/ipv4-<n>.txt` | IPv4/CIDR chunk `n` (1-based), one entry per line |
-| `GET /lists/ipv6-<n>.txt` | IPv6/CIDR chunk `n` (1-based), one entry per line |
-| `GET /stats` | JSON: entry/chunk counts, source health, chunk URLs, exclusion counts |
+| `GET /` | Plain-text index of global **all** chunk URLs, then per-category URLs |
+| `GET /lists/dns-<n>.txt` | Global domain chunk `n` (1-based), one entry per line |
+| `GET /lists/ipv4-<n>.txt` | Global IPv4/CIDR chunk `n` |
+| `GET /lists/ipv6-<n>.txt` | Global IPv6/CIDR chunk `n` |
+| `GET /lists/<category>/dns-<n>.txt` | Category domain chunk (same for `ipv4` / `ipv6`) |
+| `GET /stats` | JSON: global counts/URLs plus a `categories` array |
 | `GET /healthz` | `ok` once any snapshot is loaded, else 503 |
 | `POST /refresh` | Trigger an immediate re-fetch |
 | `GET /search?q=<entry>` | JSON: whether a domain/IP/CIDR is served, in which chunk, whether it is excluded, and any broader served entry covering it (parent domain / containing CIDR) |
@@ -98,7 +98,7 @@ the exclusions JSON written by the process itself.
 
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
-| `BLOCKLIST_URLS` | *(none)* | **yes** | Upstream list URLs. Separators: comma, space, tab, or newline. Each URL is fetched independently; a failed URL is logged and skipped. Formats: txt / hosts / adblock, JSON, YAML, TOML (detected by extension, `Content-Type`, or sniffing). |
+| `BLOCKLIST_URLS` | *(none)* | **yes** | Upstream list URLs. Separators: comma, space, tab, or newline. Optional category tag: `category:https://…` (kebab-cased, lowercased; default category if omitted). Each URL is fetched independently; a failed URL is logged and skipped. Formats: txt / hosts / adblock, JSON, YAML, TOML. |
 | `CHUNK_SIZE` | `100000` | no | Max entries per served chunk file. UniFi's external-blocklist field commonly caps around 100000; lower it if a controller rejects a chunk. Must be a positive integer. |
 | `PORT` | `8080` | no | Listen port inside the container. Keep in sync with published/mapped ports. |
 | `REFRESH_INTERVAL` | `6h` | no | How often sources are re-fetched. Go duration (`30m`, `6h`, `24h`, …). `0` disables the ticker (manual `POST /refresh` only). |

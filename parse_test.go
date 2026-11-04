@@ -41,10 +41,14 @@ func TestParseListFormats(t *testing.T) {
 		ips  []string
 	}{
 		{"https://x.test/list.txt", "# c\na.com\n0.0.0.0 b.com\n1.2.3.4\n", []string{"a.com", "b.com"}, []string{"1.2.3.4"}},
+		{"https://x.test/list.txt", "10.0.0.0/8\n10.1.0.0 // note\nc.com -- x\n", []string{"c.com"}, []string{"10.0.0.0/8", "10.1.0.0"}},
 		{"https://x.test/list.json", `["a.com","1.2.3.4"]`, []string{"a.com"}, []string{"1.2.3.4"}},
+		{"https://x.test/list.json", "// leading\n[\"a.com\"] // trail\n", []string{"a.com"}, nil},
 		{"https://x.test/list.json", `{"domains":["a.com"],"ips":["1.2.3.4"]}`, []string{"a.com"}, []string{"1.2.3.4"}},
 		{"https://x.test/list.yaml", "- a.com\n- 1.2.3.4\n", []string{"a.com"}, []string{"1.2.3.4"}},
+		{"https://x.test/list.yaml", "# hdr\n- a.com # item\n- \"http://b.com\"\n", []string{"a.com", "b.com"}, nil},
 		{"https://x.test/list.toml", "domains = [\"a.com\"]\nips = [\"1.2.3.4\"]\n", []string{"a.com"}, []string{"1.2.3.4"}},
+		{"https://x.test/list.toml", "# hdr\ndomains = [\"a.com\"] # trail\n", []string{"a.com"}, nil},
 	}
 	for _, c := range cases {
 		dns, ips, err := parseList(c.url, "", []byte(c.body))

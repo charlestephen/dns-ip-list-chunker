@@ -26,7 +26,7 @@ func testStore(t *testing.T, token string) *store {
 	dns := []string{"ads.example.com", "example.com", "tracker.example.com"}
 	ipv4 := []string{"1.2.0.0/16", "9.9.9.9"}
 	ipv6 := []string{"2001:db8::1", "2001:db8::/32"}
-	st.cur.Store(st.buildSnapshot(dns, ipv4, ipv6, 1, time.Now()))
+	st.cur.Store(st.buildSnapshot(dns, ipv4, ipv6, nil, nil, 1, time.Now()))
 	return st
 }
 
@@ -115,7 +115,7 @@ func TestExcludeSurvivesRefreshRebuild(t *testing.T) {
 	}
 	// Simulate a refresh swapping in the same upstream entries.
 	st.cur.Store(st.buildSnapshot(
-		[]string{"example.com"}, []string{"9.9.9.9"}, nil, 1, time.Now()))
+		[]string{"example.com"}, []string{"9.9.9.9"}, nil, nil, nil, 1, time.Now()))
 	snap := st.cur.Load()
 	if snap.ipv4Count != 0 || snap.excluded != 1 {
 		t.Fatalf("after rebuild: ipv4Count=%d excluded=%d", snap.ipv4Count, snap.excluded)
@@ -304,5 +304,38 @@ func TestChunkStreamsSeparated(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "/lists/dns-") || !strings.Contains(body, "/lists/ipv4-") || !strings.Contains(body, "/lists/ipv6-") {
 		t.Fatalf("index missing family URLs: %s", body)
+	}
+}
+
+func TestCategoryChunksFirstWins(t *testing.T) {
+	st := testStore(t, "")
+	threat := &categorySnap{
+		dnsAll: []string{"evil.example.com", "shared.example.com"},
+	}
+	dnsbl := &categorySnap{
+		dnsAll: []string{"ads.example.com"}, // shared claimed by threat first in real refresh
+	}
+	catAll := map[string]*categorySnap{"threat": threat, "dns-blocklisting": dnsbl}
+	order := []string{"threat", "dns-blocklisting"}
+	allDNS := []string{"ads.example.com", "evil.example.com", "shared.example.com"}
+	st.cur.Store(st.buildSnapshot(allDNS, nil, nil, catAll, order, 2, time.Now()))
+
+	rec := doReq(st, "GET", "/lists/threat/dns-1.txt", "", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "evil.example.com") {
+		t.Fatalf("threat chunk: %d %q", rec.Code, rec.Body)
+	}
+	rec = doReq(st, "GET", "/lists/dns-blocklisting/dns-1.txt", "", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "ads.example.com") {
+		t.Fatalf("dns-blocklisting chunk: %d %q", rec.Code, rec.Body)
+	}
+	rec = doReq(st, "GET", "/", "", "")
+	body := rec.Body.String()
+	if !strings.Contains(body, "# all:") || !strings.Contains(body, "# category threat:") ||
+		!strings.Contains(body, "/lists/threat/dns-1.txt") {
+		t.Fatalf("index missing category URLs: %s", body)
+	}
+	rec = doReq(st, "GET", "/search?q=evil.example.com", "", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"category":"threat"`) {
+		t.Fatalf("search category: %d %s", rec.Code, rec.Body)
 	}
 }

@@ -10,7 +10,8 @@ services:
     restart: unless-stopped
     environment:
       # Comma-separated source list URLs (txt, json, yaml, toml).
-      BLOCKLIST_URLS: "https://example.com/dns-blocklist.txt,https://example.com/ip-blocklist.txt"
+      # Optional category tag: threat:https://… — untagged → default.
+      BLOCKLIST_URLS: "threat:https://example.com/threat.txt,dns-blocklisting:https://example.com/dns-blocklist.txt,https://example.com/ip-blocklist.txt"
       # Max entries per output chunk. UniFi controllers commonly cap at 100000.
       CHUNK_SIZE: "100000"
       # How often sources are re-fetched (Go duration; 0 disables).

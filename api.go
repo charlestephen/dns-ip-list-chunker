@@ -143,12 +143,36 @@ type searchResult struct {
 	Query      string `json:"query"`
 	Normalized string `json:"normalized"`
 	Type       string `json:"type"` // "dns", "ipv4", or "ipv6"
+	Category   string `json:"category,omitempty"`
 	Found      bool   `json:"found"`
 	InSnapshot bool   `json:"in_snapshot"`
 	Excluded   bool   `json:"excluded"`
 	Chunk      int    `json:"chunk,omitempty"`
 	ChunkURL   string `json:"chunk_url,omitempty"`
 	CoveredBy  string `json:"covered_by,omitempty"`
+}
+
+func categoryOf(snap *snapshot, entry string, isIP bool) string {
+	for _, name := range snap.categoryOrder {
+		cat := snap.categories[name]
+		if cat == nil {
+			continue
+		}
+		if isIP {
+			list := cat.ipv6All
+			if isIPv4Entry(entry) {
+				list = cat.ipv4All
+			}
+			if findIP(list, entry) >= 0 {
+				return name
+			}
+			continue
+		}
+		if findDomain(cat.dnsAll, entry) >= 0 {
+			return name
+		}
+	}
+	return ""
 }
 
 func (s *store) search(snap *snapshot, base, raw string) (searchResult, bool) {
@@ -160,6 +184,9 @@ func (s *store) search(snap *snapshot, base, raw string) (searchResult, bool) {
 	res.Excluded = s.isExcluded(entry, isIP)
 	inAll, inServed := findEntry(snap, entry, isIP)
 	res.InSnapshot = inAll >= 0
+	if res.InSnapshot {
+		res.Category = categoryOf(snap, entry, isIP)
+	}
 	if inServed >= 0 {
 		res.Found = true
 		if s.cfg.chunkSize > 0 {

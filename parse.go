@@ -152,8 +152,11 @@ func detectFormat(rawURL, contentType string, body []byte) string {
 }
 
 // parseList extracts the normalized, classified entries from one fetched list.
+// Line comments (#, //, --, ;) are stripped before format-specific parsing so
+// CIDRs like 10.0.0.0/8 stay intact while 10.0.0.0 // note is trimmed.
 func parseList(rawURL, contentType string, body []byte) (dns, ips []string, err error) {
 	format := detectFormat(rawURL, contentType, body)
+	body = stripComments(body)
 	var raw []string
 	switch format {
 	case "json":
@@ -177,8 +180,7 @@ func parseList(rawURL, contentType string, body []byte) (dns, ips []string, err 
 	default: // txt
 		for _, line := range strings.Split(string(body), "\n") {
 			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") ||
-				strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
+			if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
 				continue
 			}
 			raw = append(raw, line)
