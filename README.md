@@ -107,6 +107,21 @@ the exclusions JSON written by the process itself.
 | `EXCLUSIONS_FILE` | `exclusions.json` | no | Path of the persisted exclusions JSON (atomic write-rename). Put it on a volume so removals survive restarts. In the published image the conventional path is `/data/exclusions.json` (see Compose / `podman run` examples). Corrupt file → log + start empty (file rewritten on the next change). |
 | `EXCLUSIONS_URLS` | *(unset)* | no | Remote exclusion list URLs (same separators and formats as `BLOCKLIST_URLS`). Fetched on every refresh; entries are unioned with the persistent file. Remote lists are not written to `EXCLUSIONS_FILE` — edit the remote file (e.g. `https://lists.example.com/excluded.txt`) to add/remove URL-sourced exclusions. A total fetch failure keeps the previous URL-sourced set. |
 
+### Categories
+
+Prefix a source with `category:` before the scheme:
+
+```text
+BLOCKLIST_URLS=threat:https://example.com/threat.txt,dns-blocklisting:https://example.com/dns.txt,https://example.com/misc.txt
+```
+
+- Tags are normalized to lowercase kebab-case (`Threat Intelligence` →
+  `threat-intelligence`). Omit the tag to use `default`.
+- Paste **all**-feed URLs from `/` into UniFi for a single merged blocklist,
+  or paste `/lists/<category>/…` URLs for separate UniFi lists per category.
+- An entry that appears in multiple sources is kept in the first category
+  only (source order); it still appears once in the all feed.
+
 ### Notes
 
 - Fetch size limit (128 MiB per source) is compile-time, not configurable.
@@ -116,6 +131,7 @@ the exclusions JSON written by the process itself.
 - Changing env vars requires a container restart. Persistent exclusion
   add/remove via API takes effect immediately; URL-sourced exclusions update
   on the next refresh.
+- See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Reverse proxy
 
