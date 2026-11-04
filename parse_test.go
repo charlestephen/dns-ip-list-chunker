@@ -71,3 +71,17 @@ func TestChunkStrings(t *testing.T) {
 		t.Error("chunkStrings(nil) should be nil")
 	}
 }
+
+func TestParseCSV(t *testing.T) {
+	body := "domain,note\nexample.com,x\n1.2.3.4,y\n"
+	dns, ips, err := parseList("https://x/list.csv", "", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dns) != 1 || dns[0] != "example.com" {
+		t.Fatalf("dns=%v", dns)
+	}
+	if len(ips) != 1 || ips[0] != "1.2.3.4" {
+		t.Fatalf("ips=%v", ips)
+	}
+}

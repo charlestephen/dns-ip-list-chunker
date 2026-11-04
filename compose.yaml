@@ -1,8 +1,8 @@
 services:
   blocklist-chunker:
     # Published image. Docker Hub equivalent:
-    #   docker.io/charlestephen/unifi-blocklist-chunker:latest
-    image: ghcr.io/charlestephen/unifi-blocklist-chunker:latest
+    #   docker.io/charlestephen/dns-ip-list-chunker:latest
+    image: ghcr.io/charlestephen/dns-ip-list-chunker:latest
     # To build from source instead, drop `image:` and use:
     #   build:
     #     context: .
@@ -12,7 +12,7 @@ services:
       # Comma-separated source list URLs (txt, json, yaml, toml).
       # Optional category tag: threat:https://… — untagged → default.
       BLOCKLIST_URLS: "threat:https://example.com/threat.txt,dns-blocklisting:https://example.com/dns-blocklist.txt,https://example.com/ip-blocklist.txt"
-      # Max entries per output chunk. UniFi controllers commonly cap at 100000.
+      # Max entries per output chunk. Many DNS/router UIs cap at 100000.
       CHUNK_SIZE: "100000"
       # How often sources are re-fetched (Go duration; 0 disables).
       REFRESH_INTERVAL: "6h"

@@ -1,4 +1,4 @@
 .git
-unifi-blocklist-chunker
+dns-ip-list-chunker
 *.md
 compose.yaml

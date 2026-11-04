@@ -61,6 +61,7 @@ func categoryChunkURLs(base, category string, cat *categorySnap) (dnsURLs, ipv4U
 func (s *store) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /allowlists/{category}/{name}", s.handleAllowlistChunk)
 	mux.HandleFunc("GET /lists/{category}/{name}", s.handleCategoryChunk)
 	mux.HandleFunc("GET /lists/{name}", s.handleChunk)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -109,6 +110,27 @@ func (s *store) handleIndex(w http.ResponseWriter, r *http.Request) {
 		d, v4, v6 := categoryChunkURLs(base, name, cat)
 		writeChunkList(w, "category "+name, cat.dnsCount, cat.ipv4Count, cat.ipv6Count, d, v4, v6)
 	}
+	for _, name := range snap.allowlistOrder {
+		cat := snap.allowlists[name]
+		if cat == nil {
+			continue
+		}
+		d, v4, v6 := allowlistChunkURLs(base, name, cat)
+		writeChunkList(w, "allowlist "+name, cat.dnsCount, cat.ipv4Count, cat.ipv6Count, d, v4, v6)
+	}
+}
+
+func allowlistChunkURLs(base, category string, cat *categorySnap) (dnsURLs, ipv4URLs, ipv6URLs []string) {
+	for i := range cat.dnsChunks {
+		dnsURLs = append(dnsURLs, fmt.Sprintf("%s/allowlists/%s/dns-%d.txt", base, category, i+1))
+	}
+	for i := range cat.ipv4Chunks {
+		ipv4URLs = append(ipv4URLs, fmt.Sprintf("%s/allowlists/%s/ipv4-%d.txt", base, category, i+1))
+	}
+	for i := range cat.ipv6Chunks {
+		ipv6URLs = append(ipv6URLs, fmt.Sprintf("%s/allowlists/%s/ipv6-%d.txt", base, category, i+1))
+	}
+	return dnsURLs, ipv4URLs, ipv6URLs
 }
 
 func resolveChunks(snap *snapshot, name string) (chunks [][]string, rest string, ok bool) {
@@ -163,13 +185,26 @@ func (s *store) handleChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *store) handleCategoryChunk(w http.ResponseWriter, r *http.Request) {
+	s.serveNamedChunks(w, r, false)
+}
+
+func (s *store) handleAllowlistChunk(w http.ResponseWriter, r *http.Request) {
+	s.serveNamedChunks(w, r, true)
+}
+
+func (s *store) serveNamedChunks(w http.ResponseWriter, r *http.Request, allowlist bool) {
 	snap := s.cur.Load()
 	if snap == nil {
 		http.Error(w, "no lists loaded yet", http.StatusServiceUnavailable)
 		return
 	}
 	category := normalizeCategory(r.PathValue("category"))
-	cat := snap.categories[category]
+	var cat *categorySnap
+	if allowlist {
+		cat = snap.allowlists[category]
+	} else {
+		cat = snap.categories[category]
+	}
 	if cat == nil {
 		http.NotFound(w, r)
 		return
@@ -185,7 +220,11 @@ func (s *store) handleCategoryChunk(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	etagKey := category + "/" + name
+	prefix := "lists"
+	if allowlist {
+		prefix = "allowlists"
+	}
+	etagKey := prefix + "/" + category + "/" + name
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("ETag", fmt.Sprintf(`"%d-%s"`, snap.builtAt.UnixNano(), etagKey))
@@ -239,6 +278,26 @@ func (s *store) handleStats(w http.ResponseWriter, r *http.Request) {
 			"ipv6_urls":    v6,
 		})
 	}
+	allows := make([]map[string]any, 0, len(snap.allowlistOrder))
+	for _, name := range snap.allowlistOrder {
+		cat := snap.allowlists[name]
+		if cat == nil {
+			continue
+		}
+		d, v4, v6 := allowlistChunkURLs(base, name, cat)
+		allows = append(allows, map[string]any{
+			"name":         name,
+			"dns_entries":  cat.dnsCount,
+			"ipv4_entries": cat.ipv4Count,
+			"ipv6_entries": cat.ipv6Count,
+			"dns_chunks":   len(cat.dnsChunks),
+			"ipv4_chunks":  len(cat.ipv4Chunks),
+			"ipv6_chunks":  len(cat.ipv6Chunks),
+			"dns_urls":     d,
+			"ipv4_urls":    v4,
+			"ipv6_urls":    v6,
+		})
+	}
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"chunk_size":            s.cfg.chunkSize,
@@ -264,6 +323,7 @@ func (s *store) handleStats(w http.ResponseWriter, r *http.Request) {
 		"ipv4_urls":             ipv4URLs,
 		"ipv6_urls":             ipv6URLs,
 		"categories":            cats,
+		"allowlists":            allows,
 		"refresh_secs":          int(s.cfg.refresh.Seconds()),
 	})
 }
