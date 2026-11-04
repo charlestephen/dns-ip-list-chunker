@@ -1,207 +1,96 @@
-# unifi-blocklist-chunker
+# dns-ip-list-chunker
 
-Fetches any number of upstream IP and DNS blocklists, merges and deduplicates
-them, and re-serves them as plain-text chunks sized for the UniFi Network
-Controller (which rejects oversized external blocklists).
+Fetches and merges DNS/IP blocklists (and optional allowlists), then re-serves
+them as plain-text chunks sized for DNS servers and routers that reject
+oversized external blocklists or allowlists.
+
+Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 
 ## How it works
 
-1. Every URL in `BLOCKLIST_URLS` is fetched on startup and then periodically
-   (`REFRESH_INTERVAL`). Optional category tags prefix each URL
-   (`threat:https://…`); untagged sources land in `default`. Formats are
-   detected by extension, content type, or sniffing: **txt** (plain, hosts,
-   adblock), **JSON**, **YAML**, and **TOML**. Line comments (`#`, `//`,
-   `--`, `;`) are stripped before parse; CIDRs like `10.0.0.0/8` are kept
-   (a single `/` is never a comment).
-2. Entries are normalized (lowercased, wildcards/schemes/hosts prefixes
-   stripped, CIDRs masked) and classified as **domains**, **IPv4**, or
-   **IPv6** (IPv4-mapped IPv6 addresses like `::ffff:a.b.c.d` count as IPv4).
-3. Entries are deduplicated **across all source lists** per class. Each
-   unique entry is assigned to **one** category (first source wins) and also
-   appears in the global **all** feed. Within each feed, entries are sorted
-   and split into domain / IPv4 / IPv6 chunk streams of at most `CHUNK_SIZE`.
-   Domains sort by label from the TLD leftward; IPv4/IPv6 sort numerically.
-4. A failed source never takes the service down: other sources still apply,
-   and a refresh yielding zero entries keeps the previous snapshot.
+1. Sources come from `BLOCKLIST_URLS` (optional `category:https://…` tags) and/or
+   inline `custom_blocklists` in `LISTS_FILE`. Formats: **txt**, **hosts**,
+   **adblock**, **JSON**, **YAML**, **TOML**, **CSV**. Line comments (`#`,
+   `//`, `--`, `;`) strip only at line start or after whitespace so labels
+   like `xn--…` and `o--o.example` survive; CIDRs keep a single `/`.
+2. Entries are normalized and classified as **domains**, **IPv4**, or **IPv6**.
+3. Deduplicated entries join the global **all** feed and exactly **one** block
+   category (first source wins). Feeds are sorted and split into chunks of at
+   most `CHUNK_SIZE`.
+4. `exclusion_lists` in `LISTS_FILE` (and `EXCLUSIONS_URLS` / `/manage`) withhold
+   matches from block feeds. Lists with `output_allowlist: true` also publish
+   `/allowlists/<category>/…` for routers/DNS that subscribe to allowlists.
+5. A failed URL source is skipped; other sources still apply.
 
 ## Endpoints
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /` | Plain-text index of global **all** chunk URLs, then per-category URLs |
-| `GET /lists/dns-<n>.txt` | Global domain chunk `n` (1-based), one entry per line |
-| `GET /lists/ipv4-<n>.txt` | Global IPv4/CIDR chunk `n` |
-| `GET /lists/ipv6-<n>.txt` | Global IPv6/CIDR chunk `n` |
-| `GET /lists/<category>/dns-<n>.txt` | Category domain chunk (same for `ipv4` / `ipv6`) |
-| `GET /stats` | JSON: global counts/URLs plus a `categories` array |
-| `GET /healthz` | `ok` once any snapshot is loaded, else 503 |
-| `POST /refresh` | Trigger an immediate re-fetch |
-| `GET /search?q=<entry>` | JSON: whether a domain/IP/CIDR is served, in which chunk, whether it is excluded, and any broader served entry covering it (parent domain / containing CIDR) |
-| `GET /manage` | Browser UI for search/remove/restore (admin auth) |
-| `GET /exclusions` | JSON: recorded exclusions (admin auth) |
-| `POST /exclusions` | Record an exclusion; JSON body `{"entry": "example.com"}` (admin auth) |
-| `DELETE /exclusions/<entry>` | Restore an entry; CIDRs keep their `/` — or send `{"entry": …}` as a JSON body to `DELETE /exclusions` (admin auth) |
-
-## Search and exclusions
-
-Exclusions are an allowlist layered over the upstream lists — upstream data
-is never edited. Matching is **exact only**: excluding `example.com` does not
-affect `sub.example.com`, and excluding `1.2.3.4` does not affect a served
-`1.2.0.0/16` (search reports that broader entry as `covered_by` so the effect
-is visible before acting). Excluding an entry that no upstream list currently
-contains is allowed and blocks it if a source adds it later.
-
-Exclusions apply immediately (chunks are rebuilt without a refetch), are
-re-applied on every refresh, and are persisted as JSON to `EXCLUSIONS_FILE`
-(written atomically), so they survive restarts when that path is on a volume.
-Restoring an entry re-serves it immediately if an upstream list still
-contains it.
-
-Admin endpoints require `ADMIN_TOKEN`, sent as `Authorization: Bearer <token>`
-or as the password of HTTP Basic auth (any username; the Basic form is what
-the `/manage` page uses in a browser). When `ADMIN_TOKEN` is unset, the admin
-endpoints return `503` rather than operating unauthenticated. `/search`, the
-chunk URLs, and `/stats` remain public.
-
-Examples (`<host>` is the service origin, `<token>` is `ADMIN_TOKEN`):
-
-```sh
-# Is an entry served, and in which chunk?
-curl 'http://<host>:8080/search?q=example.com'
-curl 'http://<host>:8080/search?q=1.2.3.4'
-
-# Remove an entry (exact match; takes effect immediately)
-curl -X POST -H 'Authorization: Bearer <token>' \
-  -d '{"entry":"example.com"}' http://<host>:8080/exclusions
-
-# List recorded exclusions
-curl -H 'Authorization: Bearer <token>' http://<host>:8080/exclusions
-
-# Restore an entry (CIDRs keep their / in the path form)
-curl -X DELETE -H 'Authorization: Bearer <token>' \
-  http://<host>:8080/exclusions/example.com
-curl -X DELETE -H 'Authorization: Bearer <token>' \
-  -d '{"entry":"1.2.0.0/16"}' http://<host>:8080/exclusions
-```
-
-Or open `http://<host>:8080/manage` in a browser (any username, password is
-`ADMIN_TOKEN`) for the same operations interactively.
-
-Chunk URLs carry no secrets and are safe to paste into UniFi's external
-blocklist fields; one URL per chunk is needed, and the number of URLs changes
-as upstream lists grow or shrink.
+| `GET /` | Index of **all** block URLs, per-category block URLs, then allowlists |
+| `GET /lists/dns-<n>.txt` | Global domain chunk |
+| `GET /lists/ipv4-<n>.txt` / `ipv6-<n>.txt` | Global IP chunks |
+| `GET /lists/<category>/dns-<n>.txt` | Category block chunk (also `ipv4` / `ipv6`) |
+| `GET /allowlists/<category>/dns-<n>.txt` | Optional allowlist chunk |
+| `GET /stats` | JSON counts, `categories`, `allowlists` |
+| `GET /search?q=` | Lookup (includes `category` when known) |
+| `GET /manage` | Search / exclude / restore UI (needs `ADMIN_TOKEN`) |
+| `GET`/`POST`/`DELETE /exclusions` | Exclusion API (admin auth) |
+| `POST /refresh` | Re-fetch now |
+| `GET /healthz` | Liveness |
 
 ## Configuration (environment)
 
-Every runtime knob is an environment variable. There is no config file besides
-the exclusions JSON written by the process itself.
-
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
-| `BLOCKLIST_URLS` | *(none)* | **yes** | Upstream list URLs. Separators: comma, space, tab, or newline. Optional category tag: `category:https://…` (kebab-cased, lowercased; default category if omitted). Each URL is fetched independently; a failed URL is logged and skipped. Formats: txt / hosts / adblock, JSON, YAML, TOML. |
-| `CHUNK_SIZE` | `100000` | no | Max entries per served chunk file. UniFi's external-blocklist field commonly caps around 100000; lower it if a controller rejects a chunk. Must be a positive integer. |
-| `PORT` | `8080` | no | Listen port inside the container. Keep in sync with published/mapped ports. |
-| `REFRESH_INTERVAL` | `6h` | no | How often sources are re-fetched. Go duration (`30m`, `6h`, `24h`, …). `0` disables the ticker (manual `POST /refresh` only). |
-| `BASE_URL` | *(unset)* | no | Public origin used when generating chunk URLs on `/` and `/stats` (no trailing slash), e.g. `https://lists.example.com`. When unset, the request's `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Prefix` (or the request's own scheme/host) are used — the usual Traefik / reverse-proxy path. |
-| `ADMIN_TOKEN` | *(unset)* | no | Shared secret for `GET /manage` and all `/exclusions` mutations. Send as `Authorization: Bearer <token>` or as the **password** of HTTP Basic auth (any username). **Unset = fail-closed:** those endpoints return `503`; public chunk/search/stats endpoints stay open. Set this whenever `/manage` or on-the-fly removals should work. |
-| `EXCLUSIONS_FILE` | `exclusions.json` | no | Path of the persisted exclusions JSON (atomic write-rename). Put it on a volume so removals survive restarts. In the published image the conventional path is `/data/exclusions.json` (see Compose / `podman run` examples). Corrupt file → log + start empty (file rewritten on the next change). |
-| `EXCLUSIONS_URLS` | *(unset)* | no | Remote exclusion list URLs (same separators and formats as `BLOCKLIST_URLS`). Fetched on every refresh; entries are unioned with the persistent file. Remote lists are not written to `EXCLUSIONS_FILE` — edit the remote file (e.g. `https://lists.example.com/excluded.txt`) to add/remove URL-sourced exclusions. A total fetch failure keeps the previous URL-sourced set. |
+| `BLOCKLIST_URLS` | *(none)* | one of URLs or `LISTS_FILE` | Upstream list URLs. Optional `category:https://…`. Separators: comma, space, tab, newline. |
+| `LISTS_FILE` | *(unset)* | one of URLs or file | YAML/JSON with `custom_blocklists` and `exclusion_lists` (inline multiline `entries`). |
+| `CHUNK_SIZE` | `100000` | no | Max entries per chunk. |
+| `PORT` | `8080` | no | Listen port. |
+| `REFRESH_INTERVAL` | `6h` | no | Re-fetch interval; `0` = manual only. |
+| `BASE_URL` | *(unset)* | no | Public origin for generated links; else `X-Forwarded-*`. |
+| `ADMIN_TOKEN` | *(unset)* | no | Gates `/manage` and exclusion mutations (fail-closed if unset). |
+| `EXCLUSIONS_FILE` | `exclusions.json` | no | Internal persistence for `/manage` exclusions (not a seed format). |
+| `EXCLUSIONS_URLS` | *(unset)* | no | Remote exclusion list URLs (same formats as blocklists). |
 
-### Categories
+### `LISTS_FILE` example
 
-Prefix a source with `category:` before the scheme:
-
-```text
-BLOCKLIST_URLS=threat:https://example.com/threat.txt,dns-blocklisting:https://example.com/dns.txt,https://example.com/misc.txt
+```yaml
+custom_blocklists:
+  - name: corp-extra
+    category: custom
+    entries: |
+      ads.example.com
+      203.0.113.0/24
+exclusion_lists:
+  - name: family-allow
+    category: allow-family
+    output_allowlist: true
+    entries: |
+      school.edu
+      10.0.0.0/8
 ```
 
-- Tags are normalized to lowercase kebab-case (`Threat Intelligence` →
-  `threat-intelligence`). Omit the tag to use `default`.
-- Paste **all**-feed URLs from `/` into UniFi for a single merged blocklist,
-  or paste `/lists/<category>/…` URLs for separate UniFi lists per category.
-- An entry that appears in multiple sources is kept in the first category
-  only (source order); it still appears once in the all feed.
+### Categories on URLs
 
-### Notes
-
-- Fetch size limit (128 MiB per source) is compile-time, not configurable.
-- `BLOCKLIST_URLS` must be non-empty or the process exits on startup.
-- Effective exclusions = persistent file ∪ `EXCLUSIONS_URLS`. Seed via API /
-  `/manage`, a JSON file at `EXCLUSIONS_FILE`, and/or remote exclusion lists.
-- Changing env vars requires a container restart. Persistent exclusion
-  add/remove via API takes effect immediately; URL-sourced exclusions update
-  on the next refresh.
-- See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Reverse proxy
-
-Behind a proxy that terminates HTTPS (Traefik, nginx, Caddy, …):
-
-1. Leave `BASE_URL` unset so generated chunk links pick up the public
-   origin from `X-Forwarded-*` headers.
-2. Or set `BASE_URL` to the exact public origin if your proxy does not
-   forward those headers reliably.
-3. Open `https://<public-host>/` for the plain-text index of chunk URLs to
-   paste into UniFi; open `https://<public-host>/manage` (Basic auth,
-   password = `ADMIN_TOKEN`) to search and exclude entries on the fly.
+```text
+BLOCKLIST_URLS=threat:https://example.com/threat.txt,dns-blocklisting:https://example.com/dns.txt
+```
 
 ## Run
 
-Published multi-arch (`linux/amd64`, `linux/arm64`) images:
+Published images (after rename):
 
-- GHCR: `ghcr.io/charlestephen/unifi-blocklist-chunker:latest`
-- Docker Hub: `docker.io/charlestephen/unifi-blocklist-chunker:latest`
-
-Podman:
+- GHCR: `ghcr.io/charlestephen/dns-ip-list-chunker:latest`
+- Docker Hub: `docker.io/charlestephen/dns-ip-list-chunker:latest`
 
 ```sh
-podman run -d --name unifi-blocklist-chunker \
-  --restart=unless-stopped \
+podman run -d --name dns-ip-list-chunker \
+  -e BLOCKLIST_URLS='threat:https://example.com/list.txt' \
+  -e ADMIN_TOKEN='replace-me' \
+  -e EXCLUSIONS_FILE=/data/exclusions.json \
+  -v dns-ip-list-chunker-data:/data \
   -p 8080:8080 \
-  -v unifi-blocklist-chunker-data:/data \
-  -e BLOCKLIST_URLS="https://example.com/list1.txt,https://example.com/list2.json" \
-  -e CHUNK_SIZE=100000 \
-  -e ADMIN_TOKEN="example-admin-token" \
-  -e EXCLUSIONS_FILE="/data/exclusions.json" \
-  ghcr.io/charlestephen/unifi-blocklist-chunker:latest
+  ghcr.io/charlestephen/dns-ip-list-chunker:latest
 ```
 
-Docker (identical, from Docker Hub):
-
-```sh
-docker run -d --name unifi-blocklist-chunker \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v unifi-blocklist-chunker-data:/data \
-  -e BLOCKLIST_URLS="https://example.com/list1.txt,https://example.com/list2.json" \
-  -e CHUNK_SIZE=100000 \
-  -e ADMIN_TOKEN="example-admin-token" \
-  -e EXCLUSIONS_FILE="/data/exclusions.json" \
-  docker.io/charlestephen/unifi-blocklist-chunker:latest
-```
-
-The `/data` volume is what makes exclusions survive container recreation;
-without it (or without `EXCLUSIONS_FILE` pointed at mounted storage) they
-last only for the life of the container filesystem. `ADMIN_TOKEN` can be
-omitted, in which case the admin endpoints are disabled and only the public
-chunk/search/stats endpoints work.
-
-Then open `http://<host>:8080/` for the chunk URLs to paste into UniFi,
-`http://<host>:8080/stats` for counts, or `http://<host>:8080/manage` to
-search and remove entries. Tags: `latest` tracks `main`; releases
-publish semver tags (e.g. `1.2.3`, `1.2`), and every build also publishes a
-`sha-<short>` tag.
-
-With Compose: `compose.yaml` already wires every variable above — source
-URLs, sizes, and intervals are set inline, the exclusions file lives on the
-`blocklist-data` volume — except `ADMIN_TOKEN`, which it interpolates from
-the caller's environment (`${ADMIN_TOKEN:-}`, empty disables the admin
-endpoints):
-
-```sh
-ADMIN_TOKEN='example-admin-token' podman compose up -d
-# (or: ADMIN_TOKEN='example-admin-token' docker compose up -d)
-```
-
-Build from source instead: `podman build -t unifi-blocklist-chunker .`
-(or `docker build -f Containerfile -t unifi-blocklist-chunker .`).
+See [CHANGELOG.md](CHANGELOG.md) for release history.

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0
+
+- **Fix:** `//` and `--` comment markers only apply at line start or after
+  whitespace, so domains like `o--o.duckdns.org` and `xn--…` punycode labels
+  are no longer truncated or dropped.
+- **CSV** list ingestion (`.csv` / `text/csv`); every cell is a candidate entry.
+- **`LISTS_FILE`** (YAML or JSON): `custom_blocklists` (inline named/categorized
+  block entries) and `exclusion_lists` (inline allow/exclude entries with
+  optional `output_allowlist: true` → `/allowlists/<category>/…` feeds).
+- Block sources may be URL-only, inline-only, or both (`BLOCKLIST_URLS` and/or
+  `LISTS_FILE`).
+- Project renamed to **dns-ip-list-chunker** (generic DNS/router blocklist and
+  allowlist chunking; not UniFi-specific).
+
 ## 1.2.0
 
 - **Source categories:** tag each `BLOCKLIST_URLS` entry as

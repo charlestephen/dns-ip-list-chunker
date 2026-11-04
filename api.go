@@ -45,7 +45,7 @@ func (s *store) requireAdmin(w http.ResponseWriter, r *http.Request, basicChalle
 	}
 	if !s.adminAuthorized(r) {
 		if basicChallenge {
-			w.Header().Set("WWW-Authenticate", `Basic realm="unifi-blocklist-chunker"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="dns-ip-list-chunker"`)
 		} else {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -120,6 +121,8 @@ func detectFormat(rawURL, contentType string, body []byte) string {
 		return "toml"
 	case ".txt", ".list", ".hosts":
 		return "txt"
+	case ".csv":
+		return "csv"
 	}
 	ct := strings.ToLower(contentType)
 	switch {
@@ -129,6 +132,8 @@ func detectFormat(rawURL, contentType string, body []byte) string {
 		return "yaml"
 	case strings.Contains(ct, "toml"):
 		return "toml"
+	case strings.Contains(ct, "csv"):
+		return "csv"
 	}
 	trimmed := strings.TrimSpace(string(body))
 	switch {
@@ -177,15 +182,57 @@ func parseList(rawURL, contentType string, body []byte) (dns, ips []string, err 
 			return nil, nil, fmt.Errorf("toml: %w", err)
 		}
 		collectStrings(v, &raw)
+	case "csv":
+		raw = parseCSVEntries(body)
 	default: // txt
-		for _, line := range strings.Split(string(body), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
+		raw = parseTextEntries(string(body))
+	}
+	dns, ips = classifyEntries(raw)
+	return dns, ips, nil
+}
+
+// parseTextEntries splits a plain/hosts/adblock body into raw tokens (one
+// logical line each). Also used for inline custom-list textareas.
+func parseTextEntries(body string) []string {
+	var raw []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(stripLineComment(line))
+		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		raw = append(raw, line)
+	}
+	return raw
+}
+
+// parseCSVEntries reads every cell from a CSV document and returns non-empty
+// cells as candidate entries (header cells that are not domains/IPs are
+// dropped later by normalizeEntry).
+func parseCSVEntries(body []byte) []string {
+	r := csv.NewReader(strings.NewReader(string(body)))
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+	r.TrimLeadingSpace = true
+	rows, err := r.ReadAll()
+	if err != nil {
+		// Fall back to line-oriented parsing if the CSV reader rejects the body.
+		return parseTextEntries(string(body))
+	}
+	var raw []string
+	for _, row := range rows {
+		for _, cell := range row {
+			cell = strings.TrimSpace(cell)
+			if cell == "" {
 				continue
 			}
-			raw = append(raw, line)
+			raw = append(raw, cell)
 		}
 	}
+	return raw
+}
+
+// classifyEntries normalizes raw tokens into dns / ip slices.
+func classifyEntries(raw []string) (dns, ips []string) {
 	for _, r := range raw {
 		entry, isIP, ok := normalizeEntry(r)
 		if !ok {
@@ -197,5 +244,5 @@ func parseList(rawURL, contentType string, body []byte) (dns, ips []string, err 
 			dns = append(dns, entry)
 		}
 	}
-	return dns, ips, nil
+	return dns, ips
 }

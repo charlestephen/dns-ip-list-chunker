@@ -1,4 +1,4 @@
-module github.com/charlestephen/unifi-blocklist-chunker
+module github.com/charlestephen/dns-ip-list-chunker
 
 go 1.27
 

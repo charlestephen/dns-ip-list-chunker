@@ -19,6 +19,11 @@ func TestStripLineComment(t *testing.T) {
 		{"-- full line", ""},
 		{"// full line", ""},
 		{"0.0.0.0 ads.example.com # hosts", "0.0.0.0 ads.example.com"},
+		// Double-hyphen / slash inside labels must NOT be comments.
+		{"o--o.duckdns.org", "o--o.duckdns.org"},
+		{"xn--28j2a3ar1p.died.pw", "xn--28j2a3ar1p.died.pw"},
+		{"asbouyo-----ya.easterndns.com", "asbouyo-----ya.easterndns.com"},
+		{"http://example.com/path", "http://example.com/path"},
 	}
 	for _, c := range cases {
 		if got := stripLineComment(c.in); got != c.want {

@@ -1,0 +1,11 @@
+custom_blocklists:
+  - name: corp
+    category: custom
+    entries: |
+      ads.example.com
+exclusion_lists:
+  - name: family
+    category: allow-family
+    output_allowlist: true
+    entries: |
+      school.edu
