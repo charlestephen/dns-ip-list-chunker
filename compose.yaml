@@ -28,6 +28,9 @@ services:
       # Optional remote exclusion lists (same formats as BLOCKLIST_URLS),
       # re-fetched on each refresh. Example: https://lists.example.com/excluded.txt
       # EXCLUSIONS_URLS: "https://lists.example.com/excluded.txt"
+      # When true, output_allowlist entries are also stripped from block feeds.
+      # Default false keeps allowlisted domains/IPs in the exported blocklists.
+      # ALLOWLIST_ALSO_EXCLUDES: "false"
     volumes:
       - blocklist-data:/data
     ports:
