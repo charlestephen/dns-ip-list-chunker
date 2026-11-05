@@ -94,3 +94,7 @@ podman run -d --name dns-ip-list-chunker \
 ```
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
