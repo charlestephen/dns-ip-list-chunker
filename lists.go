@@ -19,8 +19,10 @@ type namedList struct {
 }
 
 // listsFile is the optional LISTS_FILE document. Custom blocklists merge into
-// the same category feeds as BLOCKLIST_URLS. Exclusion lists withhold matches
-// from block feeds and may also publish allowlist chunk URLs.
+// the same category feeds as BLOCKLIST_URLS. Exclusion lists without
+// output_allowlist always withhold matches from block feeds. Lists with
+// output_allowlist publish allowlist chunk URLs, and only also withhold from
+// block feeds when ALLOWLIST_ALSO_EXCLUDES is enabled.
 type listsFile struct {
 	CustomBlocklists []namedList `yaml:"custom_blocklists" json:"custom_blocklists"`
 	ExclusionLists   []namedList `yaml:"exclusion_lists" json:"exclusion_lists"`

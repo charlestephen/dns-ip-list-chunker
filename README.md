@@ -18,8 +18,11 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
    category (first source wins). Feeds are sorted and split into chunks of at
    most `CHUNK_SIZE`.
 4. `exclusion_lists` in `LISTS_FILE` (and `EXCLUSIONS_URLS` / `/manage`) withhold
-   matches from block feeds. Lists with `output_allowlist: true` also publish
-   `/allowlists/<category>/…` for routers/DNS that subscribe to allowlists.
+   matches from block feeds when they are pure exclusions. Lists with
+   `output_allowlist: true` publish `/allowlists/<category>/…` for routers/DNS
+   that subscribe to allowlists; those entries are stripped from block feeds
+   only when `ALLOWLIST_ALSO_EXCLUDES=true` (default off — so you can apply
+   allow feeds to some clients while leaving the global blocklist intact).
 5. A failed URL source is skipped; other sources still apply.
 
 ## Endpoints
@@ -51,6 +54,7 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 | `ADMIN_TOKEN` | *(unset)* | no | Gates `/manage` and exclusion mutations (fail-closed if unset). |
 | `EXCLUSIONS_FILE` | `exclusions.json` | no | Internal persistence for `/manage` exclusions (not a seed format). |
 | `EXCLUSIONS_URLS` | *(unset)* | no | Remote exclusion list URLs (same formats as blocklists). |
+| `ALLOWLIST_ALSO_EXCLUDES` | `false` | no | When `true`, entries from `output_allowlist` lists are also withheld from exported block feeds. Default keeps allowlisted entries in blocklists so allow feeds can be applied per-client. |
 
 ### `LISTS_FILE` example
 
@@ -94,6 +98,14 @@ podman run -d --name dns-ip-list-chunker \
 ```
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Home Assistant
+
+Home Assistant app wrapper:
+[dns-ip-list-chunker](https://github.com/charlestephen/hassio-apps/tree/main/dns-ip-list-chunker)
+in [hassio-apps](https://github.com/charlestephen/hassio-apps).
+
+[![Open your Home Assistant instance and show the dashboard of an app.](https://my.home-assistant.io/badges/supervisor_addon.svg)](https://my.home-assistant.io/redirect/supervisor_addon/?addon=dns_ip_list_chunker&repository_url=https%3A%2F%2Fgithub.com%2Fcharlestephen%2Fhassio-apps)
 
 ## License
 

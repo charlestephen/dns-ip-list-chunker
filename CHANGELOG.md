@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0
+
+- **`ALLOWLIST_ALSO_EXCLUDES`** (default `false`): when enabled, entries from
+  `exclusion_lists` with `output_allowlist: true` are also withheld from
+  exported block feeds. Default leaves allowlisted entries in the blocklist so
+  allow feeds can be applied only to some clients. Pure exclusion lists
+  (`output_allowlist` unset/`false`), `EXCLUSIONS_URLS`, and `/manage`
+  exclusions still always withhold.
+- `/stats` includes `allowlist_also_excludes`.
+
 ## 1.3.0
 
 - **Fix:** `//` and `--` comment markers only apply at line start or after

@@ -16,16 +16,17 @@ import (
 )
 
 type config struct {
-	port           string
-	chunkSize      int
-	sources        []sourceRef
-	exclusionURLs  []string
-	listsFile      string
-	refresh        time.Duration
-	baseURL        string
-	fetchLimit     int64
-	adminToken     string
-	exclusionsFile string
+	port                  string
+	chunkSize             int
+	sources               []sourceRef
+	exclusionURLs         []string
+	listsFile             string
+	refresh               time.Duration
+	baseURL               string
+	fetchLimit            int64
+	adminToken            string
+	exclusionsFile        string
+	allowlistAlsoExcludes bool
 }
 
 func splitURLs(raw string) []string {
@@ -67,6 +68,7 @@ func loadConfig() (config, error) {
 	}
 	cfg.sources = parseSources(os.Getenv("BLOCKLIST_URLS"))
 	cfg.exclusionURLs = splitURLs(os.Getenv("EXCLUSIONS_URLS"))
+	cfg.allowlistAlsoExcludes = envBool("ALLOWLIST_ALSO_EXCLUDES", false)
 	if len(cfg.sources) == 0 && cfg.listsFile == "" {
 		return cfg, fmt.Errorf("BLOCKLIST_URLS and/or LISTS_FILE is required")
 	}
@@ -78,6 +80,34 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool parses common truthy/falsey strings; empty uses def.
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+// withholdExclusionListFromBlocks reports whether an exclusion_lists entry
+// should be stripped from exported block feeds. Pure exclusion lists always
+// withhold. Lists with output_allowlist only withhold when
+// ALLOWLIST_ALSO_EXCLUDES is on (so allow feeds can be applied to some
+// clients without removing those entries from the global blocklist).
+func withholdExclusionListFromBlocks(outputAllowlist, allowlistAlsoExcludes bool) bool {
+	if !outputAllowlist {
+		return true
+	}
+	return allowlistAlsoExcludes
 }
 
 // categorySnap holds one category's full/served/chunked entry sets.
@@ -387,7 +417,7 @@ func (s *store) fetchOne(ctx context.Context, url string) (dns, ips []string, er
 	if err != nil {
 		return nil, nil, err
 	}
-	req.Header.Set("User-Agent", "dns-ip-list-chunker/1.3")
+	req.Header.Set("User-Agent", "dns-ip-list-chunker/1.4")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -515,11 +545,13 @@ func (s *store) refresh(ctx context.Context) error {
 	seenAllow := make(map[string]bool)
 	for _, excl := range lists.ExclusionLists {
 		dns, ips := excl.parsedEntries()
-		for _, e := range dns {
-			listDNS[e] = struct{}{}
-		}
-		for _, e := range ips {
-			listIPs[e] = struct{}{}
+		if withholdExclusionListFromBlocks(excl.OutputAllowlist, s.cfg.allowlistAlsoExcludes) {
+			for _, e := range dns {
+				listDNS[e] = struct{}{}
+			}
+			for _, e := range ips {
+				listIPs[e] = struct{}{}
+			}
 		}
 		if !excl.OutputAllowlist {
 			continue
