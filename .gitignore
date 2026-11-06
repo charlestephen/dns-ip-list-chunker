@@ -1,2 +1,4 @@
 /dns-ip-list-chunker
 *.test
+.cursor
+.vscode
