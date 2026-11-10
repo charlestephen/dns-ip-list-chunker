@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 // stripLineComment removes a trailing line comment introduced by #, //, --,
 // or ;. Markers inside single- or double-quoted strings are left alone so
@@ -69,11 +72,21 @@ func commentBoundary(line string, i int) bool {
 }
 
 // stripComments applies stripLineComment to every line of a document.
-// Used before JSON/YAML/TOML/CSV decode and for plain-text list parsing.
+// Used before JSON/YAML/TOML/CSV decode. Bodies with no comment marker at
+// all are returned untouched.
 func stripComments(body []byte) []byte {
-	lines := strings.Split(string(body), "\n")
-	for i, line := range lines {
-		lines[i] = stripLineComment(line)
+	if bytes.IndexAny(body, "#;") < 0 && !bytes.Contains(body, []byte("//")) && !bytes.Contains(body, []byte("--")) {
+		return body
 	}
-	return []byte(strings.Join(lines, "\n"))
+	rest := string(body)
+	out := make([]byte, 0, len(rest))
+	for len(rest) > 0 {
+		line, tail, found := strings.Cut(rest, "\n")
+		out = append(out, stripLineComment(line)...)
+		if found {
+			out = append(out, '\n')
+		}
+		rest = tail
+	}
+	return out
 }

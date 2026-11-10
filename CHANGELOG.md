@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+Performance release. Output is byte-identical to 1.4.0 for the same inputs
+(verified on 26 real-world sources: 1.28M domains and 496k IPs, every chunk
+stream and category).
+
+- **Sorting:** domains and IPs are keyed once and sorted in bulk instead of
+  re-deriving label order / re-parsing addresses inside every comparison
+  (`domainCompare` allocated two slices per call). Global lists are sorted
+  once and category lists are derived from the sorted result instead of being
+  sorted again.
+- **Conditional fetches:** sources are requested with `If-None-Match` /
+  `If-Modified-Since`. When no source, custom list or exclusion list changed,
+  the refresh keeps the current snapshot without parsing or rebuilding. A
+  source that fails the same way as on the previous attempt does not force a
+  rebuild either.
+- **Merging:** deduplication and first-source-wins category assignment come
+  from a single sort per stream instead of per-entry owner maps.
+- **Parsing:** plain-text lists are parsed in a single pass without
+  intermediate line/token slices or a separate comment-stripping copy; CSV is
+  streamed; hosts-file field splitting and domain validation no longer
+  allocate.
+- **Memory:** category snapshots share slices instead of copying them, the
+  download buffer is sized from `Content-Length`, and memory is returned to
+  the OS after a rebuild.
+- **Locking:** a refresh no longer holds the snapshot lock while downloading,
+  so `/manage` exclusion edits stay responsive during a refresh.
+- **Chunk responses:** `ETag` is now a content hash, so a chunk keeps its ETag
+  across refreshes that did not change it, and `If-None-Match` is answered
+  with `304 Not Modified`. Bodies are written in one call.
+- `POST /refresh` returns `409` while another refresh is running instead of
+  queueing a duplicate.
+- `/stats` `updated_at` is the time the lists last changed upstream, not the
+  time of the last check.
+
 ## 1.4.0
 
 - **`ALLOWLIST_ALSO_EXCLUDES`** (default `false`): when enabled, entries from

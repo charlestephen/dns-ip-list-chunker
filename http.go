@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -159,6 +160,46 @@ func resolveCategoryChunks(cat *categorySnap, name string) (chunks [][]string, r
 	}
 }
 
+// chunkETag is a content hash (FNV-1a over the entries), so a chunk keeps
+// its ETag across refreshes that did not change it and clients get 304s.
+func chunkETag(entries []string) string {
+	const prime = 1099511628211
+	h := uint64(14695981039346656037)
+	for _, e := range entries {
+		for i := 0; i < len(e); i++ {
+			h = (h ^ uint64(e[i])) * prime
+		}
+		h = (h ^ '\n') * prime
+	}
+	return fmt.Sprintf(`"%016x"`, h)
+}
+
+// writeChunk serves one chunk as text/plain, answering a matching
+// If-None-Match with 304 before any body is built, and writing the body in
+// a single call rather than one Fprintln per entry.
+func writeChunk(w http.ResponseWriter, r *http.Request, entries []string) {
+	etag := chunkETag(entries)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("ETag", etag)
+	if inm := r.Header.Get("If-None-Match"); inm != "" && (inm == "*" || strings.Contains(inm, etag)) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	size := 0
+	for _, e := range entries {
+		size += len(e) + 1
+	}
+	var b strings.Builder
+	b.Grow(size)
+	for _, e := range entries {
+		b.WriteString(e)
+		b.WriteByte('\n')
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(size))
+	_, _ = io.WriteString(w, b.String())
+}
+
 func (s *store) handleChunk(w http.ResponseWriter, r *http.Request) {
 	snap := s.cur.Load()
 	if snap == nil {
@@ -176,12 +217,7 @@ func (s *store) handleChunk(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Header().Set("ETag", fmt.Sprintf(`"%d-%s"`, snap.builtAt.UnixNano(), name))
-	for _, e := range chunks[n-1] {
-		fmt.Fprintln(w, e)
-	}
+	writeChunk(w, r, chunks[n-1])
 }
 
 func (s *store) handleCategoryChunk(w http.ResponseWriter, r *http.Request) {
@@ -220,17 +256,7 @@ func (s *store) serveNamedChunks(w http.ResponseWriter, r *http.Request, allowli
 		http.NotFound(w, r)
 		return
 	}
-	prefix := "lists"
-	if allowlist {
-		prefix = "allowlists"
-	}
-	etagKey := prefix + "/" + category + "/" + name
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Header().Set("ETag", fmt.Sprintf(`"%d-%s"`, snap.builtAt.UnixNano(), etagKey))
-	for _, e := range chunks[n-1] {
-		fmt.Fprintln(w, e)
-	}
+	writeChunk(w, r, chunks[n-1])
 }
 
 func (s *store) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -300,39 +326,46 @@ func (s *store) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"chunk_size":            s.cfg.chunkSize,
-		"dns_entries":           snap.dnsCount,
-		"ipv4_entries":          snap.ipv4Count,
-		"ipv6_entries":          snap.ipv6Count,
-		"dns_entries_total":     len(snap.dnsAll),
-		"ipv4_entries_total":    len(snap.ipv4All),
-		"ipv6_entries_total":    len(snap.ipv6All),
-		"exclusions_total":      exclusionsPersistent + exclusionsFromURLs,
-		"exclusions_persistent": exclusionsPersistent,
-		"exclusions_from_urls":  exclusionsFromURLs,
+		"chunk_size":              s.cfg.chunkSize,
+		"dns_entries":             snap.dnsCount,
+		"ipv4_entries":            snap.ipv4Count,
+		"ipv6_entries":            snap.ipv6Count,
+		"dns_entries_total":       len(snap.dnsAll),
+		"ipv4_entries_total":      len(snap.ipv4All),
+		"ipv6_entries_total":      len(snap.ipv6All),
+		"exclusions_total":        exclusionsPersistent + exclusionsFromURLs,
+		"exclusions_persistent":   exclusionsPersistent,
+		"exclusions_from_urls":    exclusionsFromURLs,
 		"exclusions_active":       snap.excluded,
 		"exclusion_urls":          len(s.cfg.exclusionURLs),
 		"allowlist_also_excludes": s.cfg.allowlistAlsoExcludes,
 		"admin_auth_required":     s.cfg.adminToken != "",
-		"dns_chunks":            len(dnsURLs),
-		"ipv4_chunks":           len(ipv4URLs),
-		"ipv6_chunks":           len(ipv6URLs),
-		"sources_ok":            snap.sourcesOK,
-		"sources":               len(s.cfg.sources),
-		"updated_at":            snap.updatedAt.Format(time.RFC3339),
-		"dns_urls":              dnsURLs,
-		"ipv4_urls":             ipv4URLs,
-		"ipv6_urls":             ipv6URLs,
-		"categories":            cats,
-		"allowlists":            allows,
-		"refresh_secs":          int(s.cfg.refresh.Seconds()),
+		"dns_chunks":              len(dnsURLs),
+		"ipv4_chunks":             len(ipv4URLs),
+		"ipv6_chunks":             len(ipv6URLs),
+		"sources_ok":              snap.sourcesOK,
+		"sources":                 len(s.cfg.sources),
+		"updated_at":              snap.updatedAt.Format(time.RFC3339),
+		"dns_urls":                dnsURLs,
+		"ipv4_urls":               ipv4URLs,
+		"ipv6_urls":               ipv6URLs,
+		"categories":              cats,
+		"allowlists":              allows,
+		"refresh_secs":            int(s.cfg.refresh.Seconds()),
 	})
 }
 
 func (s *store) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	// One refresh at a time: a second request while one runs would only
+	// queue up behind it and repeat the same work.
+	if !s.refreshMu.TryLock() {
+		http.Error(w, "refresh already in progress", http.StatusConflict)
+		return
+	}
+	defer s.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
-	if err := s.refresh(ctx); err != nil {
+	if err := s.refreshLocked(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

@@ -64,5 +64,7 @@ func (n namedList) categorySlug() string {
 }
 
 func (n namedList) parsedEntries() (dns, ips []string) {
-	return classifyEntries(parseTextEntries(n.Entries))
+	var c classifier
+	c.text(n.Entries)
+	return c.dns, c.ips
 }

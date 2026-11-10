@@ -38,7 +38,7 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 | `GET /search?q=` | Lookup (includes `category` when known) |
 | `GET /manage` | Search / exclude / restore UI (needs `ADMIN_TOKEN`) |
 | `GET`/`POST`/`DELETE /exclusions` | Exclusion API (admin auth) |
-| `POST /refresh` | Re-fetch now |
+| `POST /refresh` | Re-check sources now (`409` if a refresh is already running) |
 | `GET /healthz` | Liveness |
 
 ## Configuration (environment)
@@ -49,7 +49,7 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 | `LISTS_FILE` | *(unset)* | one of URLs or file | YAML/JSON with `custom_blocklists` and `exclusion_lists` (inline multiline `entries`). |
 | `CHUNK_SIZE` | `100000` | no | Max entries per chunk. |
 | `PORT` | `8080` | no | Listen port. |
-| `REFRESH_INTERVAL` | `6h` | no | Re-fetch interval; `0` = manual only. |
+| `REFRESH_INTERVAL` | `6h` | no | Re-check interval; `0` = manual only. Sources are fetched with `If-None-Match` / `If-Modified-Since`; when every source answers `304 Not Modified` nothing is re-parsed or rebuilt. |
 | `BASE_URL` | *(unset)* | no | Public origin for generated links; else `X-Forwarded-*`. |
 | `ADMIN_TOKEN` | *(unset)* | no | Gates `/manage` and exclusion mutations (fail-closed if unset). |
 | `EXCLUSIONS_FILE` | `exclusions.json` | no | Internal persistence for `/manage` exclusions (not a seed format). |

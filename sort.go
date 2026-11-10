@@ -2,7 +2,7 @@ package main
 
 import (
 	"net/netip"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -11,39 +11,70 @@ import (
 // google.com), and so on. When one name is a proper suffix of the other
 // under that order, the shorter (closer to the root) comes first —
 // example.com before mail.example.com.
+//
+// It walks both names from the right without allocating, because it runs
+// inside binary searches and sortedness checks over millions of entries.
 func domainCompare(a, b string) int {
 	if a == b {
 		return 0
 	}
-	aParts := strings.Split(a, ".")
-	bParts := strings.Split(b, ".")
-	for i := 1; ; i++ {
-		aOK := i <= len(aParts)
-		bOK := i <= len(bParts)
-		if !aOK && !bOK {
+	ae, be := len(a), len(b) // exclusive end of the label still to compare; -1 = exhausted
+	for {
+		switch {
+		case ae < 0 && be < 0:
 			return 0
-		}
-		if !aOK {
+		case ae < 0:
 			return -1
-		}
-		if !bOK {
+		case be < 0:
 			return 1
 		}
-		al := aParts[len(aParts)-i]
-		bl := bParts[len(bParts)-i]
-		if al < bl {
-			return -1
+		as := strings.LastIndexByte(a[:ae], '.') + 1
+		bs := strings.LastIndexByte(b[:be], '.') + 1
+		if c := strings.Compare(a[as:ae], b[bs:be]); c != 0 {
+			return c
 		}
-		if al > bl {
-			return 1
-		}
+		ae, be = as-1, bs-1
 	}
 }
 
 func domainLess(a, b string) bool { return domainCompare(a, b) < 0 }
 
+// domainKey rewrites a domain with its labels reversed and joined by NUL,
+// so a plain byte comparison of two keys equals domainCompare of the names:
+// NUL sorts below every valid label byte, which keeps "a" before "a-b" and
+// a parent before its subdomains.
+func domainKey(d string) string {
+	var b strings.Builder
+	b.Grow(len(d))
+	end := len(d)
+	for end >= 0 {
+		start := strings.LastIndexByte(d[:end], '.') + 1
+		b.WriteString(d[start:end])
+		if start > 0 {
+			b.WriteByte(0)
+		}
+		end = start - 1
+	}
+	return b.String()
+}
+
+// sortDomains sorts in place, root-first. Keys are built once up front
+// instead of re-deriving label order inside every comparison, and input
+// that is already sorted (the exclusion-rebuild path) returns after one
+// linear pass.
 func sortDomains(entries []string) {
-	sort.Slice(entries, func(i, j int) bool { return domainLess(entries[i], entries[j]) })
+	if len(entries) < 2 || slices.IsSortedFunc(entries, domainCompare) {
+		return
+	}
+	type keyed struct{ key, val string }
+	ks := make([]keyed, len(entries))
+	for i, e := range entries {
+		ks[i] = keyed{domainKey(e), e}
+	}
+	slices.SortFunc(ks, func(x, y keyed) int { return strings.Compare(x.key, y.key) })
+	for i := range ks {
+		entries[i] = ks[i].val
+	}
 }
 
 // ipSortKey is the numeric sort key for an IP or CIDR. Addresses are
@@ -64,9 +95,13 @@ func ipSortKey(entry string) (netip.Addr, int) {
 func ipCompare(a, b string) int {
 	aa, ab := ipSortKey(a)
 	ba, bb := ipSortKey(b)
+	return compareIPKeys(a, aa, ab, b, ba, bb)
+}
+
+func compareIPKeys(as string, aa netip.Addr, ab int, bs string, ba netip.Addr, bb int) int {
 	switch {
 	case !aa.IsValid() && !ba.IsValid():
-		return strings.Compare(a, b)
+		return strings.Compare(as, bs)
 	case !aa.IsValid():
 		return 1
 	case !ba.IsValid():
@@ -85,8 +120,27 @@ func ipCompare(a, b string) int {
 	}
 }
 
+// sortIPs sorts in place by numeric address. Each entry is parsed once
+// (not twice per comparison) and the sort is stable, so equal keys keep
+// their input order. Already-sorted input returns after one linear pass.
 func sortIPs(entries []string) {
-	sort.SliceStable(entries, func(i, j int) bool {
-		return ipCompare(entries[i], entries[j]) < 0
+	if len(entries) < 2 || slices.IsSortedFunc(entries, ipCompare) {
+		return
+	}
+	type keyed struct {
+		addr netip.Addr
+		bits int
+		val  string
+	}
+	ks := make([]keyed, len(entries))
+	for i, e := range entries {
+		a, b := ipSortKey(e)
+		ks[i] = keyed{a, b, e}
+	}
+	slices.SortStableFunc(ks, func(x, y keyed) int {
+		return compareIPKeys(x.val, x.addr, x.bits, y.val, y.addr, y.bits)
 	})
+	for i := range ks {
+		entries[i] = ks[i].val
+	}
 }

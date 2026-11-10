@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -173,8 +178,25 @@ type store struct {
 	listDNS   map[string]struct{}
 	listIPs   map[string]struct{}
 	cur       atomic.Pointer[snapshot]
-	mu        sync.Mutex // serializes refreshes and exclusion-driven rebuilds
+	// mu guards building and publishing a snapshot (exclusion-driven
+	// rebuilds and the final step of a refresh). It is never held across
+	// network I/O, so /manage edits stay responsive during a refresh.
+	mu sync.Mutex
+	// refreshMu serializes whole refreshes and guards the fields below.
+	refreshMu sync.Mutex
+	// validators holds the ETag / Last-Modified of each source as last
+	// loaded into the published snapshot; failed marks sources that errored
+	// on the previous attempt; listsSig is the serialized LISTS_FILE that
+	// snapshot was built from.
+	validators map[string]validator
+	failed     map[string]bool
+	listsSig   string
 }
+
+// validator is the HTTP cache validators a source returned.
+type validator struct{ etag, lastModified string }
+
+func (v validator) empty() bool { return v.etag == "" && v.lastModified == "" }
 
 // effectiveExclusions merges persistent file exclusions with the latest
 // URL-seeded set.
@@ -279,24 +301,6 @@ func finishCategory(cat *categorySnap, size int, exclDNS, exclIPs map[string]str
 	cat.ipv6Count = len(cat.ipv6Served)
 }
 
-func cloneCatMap(src map[string]*categorySnap, order []string) (map[string]*categorySnap, []string) {
-	out := map[string]*categorySnap{}
-	var ord []string
-	for _, name := range order {
-		c, ok := src[name]
-		if !ok {
-			continue
-		}
-		out[name] = &categorySnap{
-			dnsAll:  append([]string(nil), c.dnsAll...),
-			ipv4All: append([]string(nil), c.ipv4All...),
-			ipv6All: append([]string(nil), c.ipv6All...),
-		}
-		ord = append(ord, name)
-	}
-	return out, ord
-}
-
 func finishAllowlist(cat *categorySnap, size int) {
 	// Allowlists are published as-is (not filtered by exclusions).
 	sortDomains(cat.dnsAll)
@@ -333,11 +337,9 @@ func (s *store) buildSnapshot(dnsAll, ipv4All, ipv6All []string, catAll map[stri
 		if !ok {
 			continue
 		}
-		cat := &categorySnap{
-			dnsAll:  append([]string(nil), src.dnsAll...),
-			ipv4All: append([]string(nil), src.ipv4All...),
-			ipv6All: append([]string(nil), src.ipv6All...),
-		}
+		// The All slices are immutable once built and sorted in place only
+		// when unsorted, so a rebuild can share them instead of copying.
+		cat := &categorySnap{dnsAll: src.dnsAll, ipv4All: src.ipv4All, ipv6All: src.ipv6All}
 		finishCategory(cat, s.cfg.chunkSize, exclDNS, exclIPs)
 		if len(cat.dnsAll)+len(cat.ipv4All)+len(cat.ipv6All) == 0 {
 			continue
@@ -353,11 +355,7 @@ func (s *store) buildSnapshot(dnsAll, ipv4All, ipv6All []string, catAll map[stri
 		if !ok {
 			continue
 		}
-		cat := &categorySnap{
-			dnsAll:  append([]string(nil), src.dnsAll...),
-			ipv4All: append([]string(nil), src.ipv4All...),
-			ipv6All: append([]string(nil), src.ipv6All...),
-		}
+		cat := &categorySnap{dnsAll: src.dnsAll, ipv4All: src.ipv4All, ipv6All: src.ipv6All}
 		finishAllowlist(cat, s.cfg.chunkSize)
 		if cat.dnsCount+cat.ipv4Count+cat.ipv6Count == 0 {
 			continue
@@ -399,9 +397,7 @@ func (s *store) rebuild() {
 	if snap == nil {
 		return
 	}
-	catAll, catOrder := cloneCatMap(snap.categories, snap.categoryOrder)
-	allowAll, allowOrder := cloneCatMap(snap.allowlists, snap.allowlistOrder)
-	s.cur.Store(s.buildSnapshot(snap.dnsAll, snap.ipv4All, snap.ipv6All, catAll, catOrder, allowAll, allowOrder, snap.sourcesOK, snap.updatedAt))
+	s.cur.Store(s.buildSnapshot(snap.dnsAll, snap.ipv4All, snap.ipv6All, snap.categories, snap.categoryOrder, snap.allowlists, snap.allowlistOrder, snap.sourcesOK, snap.updatedAt))
 }
 
 func chunkStrings(entries []string, size int) [][]string {
@@ -412,36 +408,83 @@ func chunkStrings(entries []string, size int) [][]string {
 	return chunks
 }
 
-func (s *store) fetchOne(ctx context.Context, url string) (dns, ips []string, err error) {
+// fetched is the result of one source download.
+type fetched struct {
+	dns, ips    []string
+	v           validator
+	notModified bool
+}
+
+// fetch downloads and parses one list. When prev is non-nil its validators
+// are sent as If-None-Match / If-Modified-Since and a 304 yields
+// notModified without a body.
+func (s *store) fetch(ctx context.Context, url string, prev *validator) (fetched, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, err
+		return fetched{}, err
 	}
 	req.Header.Set("User-Agent", "dns-ip-list-chunker/1.4")
+	if prev != nil {
+		if prev.etag != "" {
+			req.Header.Set("If-None-Match", prev.etag)
+		}
+		if prev.lastModified != "" {
+			req.Header.Set("If-Modified-Since", prev.lastModified)
+		}
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return fetched{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified && prev != nil {
+		return fetched{notModified: true, v: *prev}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("HTTP %s", resp.Status)
+		return fetched{}, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.fetchLimit))
+	var buf bytes.Buffer
+	if n := resp.ContentLength; n > 0 && n <= s.cfg.fetchLimit {
+		buf.Grow(int(n)) // exact size: avoids ReadAll's repeated grow-and-copy
+	}
+	if _, err := io.Copy(&buf, io.LimitReader(resp.Body, s.cfg.fetchLimit)); err != nil {
+		return fetched{}, err
+	}
+	dns, ips, err := parseList(url, resp.Header.Get("Content-Type"), buf.Bytes())
 	if err != nil {
-		return nil, nil, err
+		return fetched{}, err
 	}
-	return parseList(url, resp.Header.Get("Content-Type"), body)
+	return fetched{dns: dns, ips: ips, v: validator{resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")}}, nil
+}
+
+func (s *store) fetchOne(ctx context.Context, url string) (dns, ips []string, err error) {
+	f, err := s.fetch(ctx, url, nil)
+	return f.dns, f.ips, err
+}
+
+func sameSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // refreshExclusionURLs fetches EXCLUSIONS_URLS and replaces the in-memory
 // URL-sourced exclusion sets when at least one URL succeeds. Total failure
-// keeps the previous URL-sourced set. No URLs configured clears them.
-func (s *store) refreshExclusionURLs(ctx context.Context) {
+// keeps the previous URL-sourced set. No URLs configured clears them. It
+// reports whether the effective set changed.
+func (s *store) refreshExclusionURLs(ctx context.Context) (changed bool) {
 	if len(s.cfg.exclusionURLs) == 0 {
 		s.urlExclMu.Lock()
+		changed = len(s.urlDNS)+len(s.urlIPs) > 0
 		s.urlDNS, s.urlIPs = nil, nil
 		s.urlExclMu.Unlock()
-		return
+		return changed
 	}
 	dnsSet := make(map[string]struct{})
 	ipSet := make(map[string]struct{})
@@ -468,38 +511,20 @@ func (s *store) refreshExclusionURLs(ctx context.Context) {
 	}
 	if ok == 0 {
 		log.Printf("exclusion sources: all %d failed; keeping previous URL exclusions", len(s.cfg.exclusionURLs))
-		return
+		return false
 	}
 	s.urlExclMu.Lock()
+	changed = !sameSet(s.urlDNS, dnsSet) || !sameSet(s.urlIPs, ipSet)
 	s.urlDNS, s.urlIPs = dnsSet, ipSet
 	s.urlExclMu.Unlock()
 	log.Printf("exclusion sources: loaded %d DNS + %d IP from %d/%d URL(s)",
 		len(dnsSet), len(ipSet), ok, len(s.cfg.exclusionURLs))
+	return changed
 }
 
-func claimEntries(dnsOwner, ipOwner map[string]string, catDNS, catIP map[string]map[string]struct{}, catOrder *[]string, seenCat map[string]bool, category string, dns, ips []string) {
-	if !seenCat[category] {
-		seenCat[category] = true
-		*catOrder = append(*catOrder, category)
-	}
-	if catDNS[category] == nil {
-		catDNS[category] = make(map[string]struct{})
-		catIP[category] = make(map[string]struct{})
-	}
-	for _, e := range dns {
-		if _, exists := dnsOwner[e]; !exists {
-			dnsOwner[e] = category
-			catDNS[category][e] = struct{}{}
-		}
-	}
-	for _, e := range ips {
-		if _, exists := ipOwner[e]; !exists {
-			ipOwner[e] = category
-			catIP[category][e] = struct{}{}
-		}
-	}
-}
-
+// catAllFromSets builds per-category entry slices from membership sets. Only
+// the (small) allowlists use it; block categories come out of mergeSources
+// already sorted.
 func catAllFromSets(catOrder []string, catDNS, catIP map[string]map[string]struct{}) map[string]*categorySnap {
 	catAll := make(map[string]*categorySnap, len(catOrder))
 	for _, name := range catOrder {
@@ -523,19 +548,110 @@ func catAllFromSets(catOrder []string, catDNS, catIP map[string]map[string]struc
 	return catAll
 }
 
+// sourceEntries is one parsed source: its category slot (index into the
+// first-seen category order) and its entries. Position in the slice is the
+// source's priority; the earliest source containing an entry owns it.
+type sourceEntries struct {
+	cat      int
+	dns, ips []string
+}
+
+// mergeSources deduplicates every source into globally sorted domain / IPv4 /
+// IPv6 slices and splits them into per-category slices (first source wins),
+// with a single sort per stream and no per-entry maps. Walking the sorted
+// result in order keeps every category slice sorted for free.
+func mergeSources(srcs []sourceEntries, catOrder []string) (dns, ipv4, ipv6 []string, cats map[string]*categorySnap) {
+	cats = make(map[string]*categorySnap, len(catOrder))
+	catSnaps := make([]*categorySnap, len(catOrder))
+	for i, name := range catOrder {
+		catSnaps[i] = &categorySnap{}
+		cats[name] = catSnaps[i]
+	}
+
+	type domainEnt struct {
+		key, val string
+		src      int32
+	}
+	nd, ni := 0, 0
+	for _, src := range srcs {
+		nd += len(src.dns)
+		ni += len(src.ips)
+	}
+	ds := make([]domainEnt, 0, nd)
+	for i, src := range srcs {
+		for _, e := range src.dns {
+			ds = append(ds, domainEnt{domainKey(e), e, int32(i)})
+		}
+		srcs[i].dns = nil // release as we go
+	}
+	slices.SortFunc(ds, func(a, b domainEnt) int {
+		return cmp.Or(strings.Compare(a.key, b.key), cmp.Compare(a.src, b.src))
+	})
+	dns = make([]string, 0, len(ds))
+	for i, d := range ds {
+		if i > 0 && d.key == ds[i-1].key {
+			continue // duplicate of a higher-priority source
+		}
+		dns = append(dns, d.val)
+		c := catSnaps[srcs[d.src].cat]
+		c.dnsAll = append(c.dnsAll, d.val)
+	}
+	ds = nil
+
+	type ipEnt struct {
+		addr netip.Addr
+		bits int
+		val  string
+		src  int32
+	}
+	is := make([]ipEnt, 0, ni)
+	for i, src := range srcs {
+		for _, e := range src.ips {
+			a, b := ipSortKey(e)
+			is = append(is, ipEnt{a, b, e, int32(i)})
+		}
+		srcs[i].ips = nil
+	}
+	slices.SortFunc(is, func(a, b ipEnt) int {
+		return cmp.Or(compareIPKeys(a.val, a.addr, a.bits, b.val, b.addr, b.bits), strings.Compare(a.val, b.val), cmp.Compare(a.src, b.src))
+	})
+	for i, e := range is {
+		if i > 0 && e.val == is[i-1].val {
+			continue
+		}
+		c := catSnaps[srcs[e.src].cat]
+		if e.addr.Is4() {
+			ipv4 = append(ipv4, e.val)
+			c.ipv4All = append(c.ipv4All, e.val)
+		} else {
+			ipv6 = append(ipv6, e.val)
+			c.ipv6All = append(c.ipv6All, e.val)
+		}
+	}
+	return dns, ipv4, ipv6, cats
+}
+
 // refresh fetches every source, merges custom/exclusion lists from LISTS_FILE,
 // deduplicates, and atomically swaps in the new chunked snapshot.
 func (s *store) refresh(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	return s.refreshLocked(ctx)
+}
 
-	s.refreshExclusionURLs(ctx)
+// refreshLocked does the work of refresh; the caller holds refreshMu. The
+// expensive steps (network, parsing, sorting) run without s.mu so exclusion
+// edits stay responsive; only the final build-and-publish takes it.
+func (s *store) refreshLocked(ctx context.Context) error {
+	exclChanged := s.refreshExclusionURLs(ctx)
 
 	lists, err := loadListsFile(s.cfg.listsFile)
 	if err != nil {
 		log.Printf("lists file %s: %v (continuing without it)", s.cfg.listsFile, err)
 		lists = listsFile{}
 	}
+	sigBytes, _ := json.Marshal(lists)
+	listsSig := string(sigBytes)
 
 	listDNS := make(map[string]struct{})
 	listIPs := make(map[string]struct{})
@@ -576,24 +692,75 @@ func (s *store) refresh(ctx context.Context) error {
 	s.listDNS, s.listIPs = listDNS, listIPs
 	s.urlExclMu.Unlock()
 
-	dnsOwner := make(map[string]string)
-	ipOwner := make(map[string]string)
-	catDNS := make(map[string]map[string]struct{})
-	catIP := make(map[string]map[string]struct{})
+	// Pass 1: conditional fetch. A source answering 304 is not parsed.
+	havePrev := s.cur.Load() != nil
+	results := make([]fetched, len(s.cfg.sources))
+	errs := make([]error, len(s.cfg.sources))
+	allUnchanged := havePrev && listsSig == s.listsSig
+	for i, src := range s.cfg.sources {
+		var prev *validator
+		if v, ok := s.validators[src.URL]; ok && havePrev && !v.empty() {
+			prev = &v
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		results[i], errs[i] = s.fetch(fetchCtx, src.URL, prev)
+		cancel()
+		switch {
+		case errs[i] != nil:
+			// Failing again exactly as it did last time leaves the snapshot valid.
+			if !s.failed[src.URL] {
+				allUnchanged = false
+			}
+		case !results[i].notModified:
+			allUnchanged = false
+		}
+	}
+	if allUnchanged {
+		if exclChanged {
+			s.rebuild() // only the remote exclusion set moved: re-filter, no re-sort
+			log.Printf("refresh: sources unchanged; re-applied updated exclusion lists")
+		} else {
+			log.Printf("refresh: no upstream changes (%d source(s) unchanged); keeping current lists", len(s.cfg.sources))
+		}
+		return nil
+	}
+
+	// Pass 2: something changed, so the whole set must be rebuilt. Sources
+	// that answered 304 have no data in hand; fetch them in full.
+	var srcs []sourceEntries
 	var catOrder []string
-	seenCat := make(map[string]bool)
+	catIdx := make(map[string]int)
+	slot := func(category string) int {
+		i, ok := catIdx[category]
+		if !ok {
+			i = len(catOrder)
+			catIdx[category] = i
+			catOrder = append(catOrder, category)
+		}
+		return i
+	}
+	validators := make(map[string]validator)
+	failed := make(map[string]bool)
 	okCount := 0
 	var failures []string
-	for _, src := range s.cfg.sources {
-		fetchCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		dns, ips, err := s.fetchOne(fetchCtx, src.URL)
-		cancel()
+	for i, src := range s.cfg.sources {
+		res, err := results[i], errs[i]
+		if err == nil && res.notModified {
+			fetchCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			res, err = s.fetch(fetchCtx, src.URL, nil)
+			cancel()
+		}
 		if err != nil {
+			failed[src.URL] = true
 			failures = append(failures, fmt.Sprintf("%s (%s): %v", src.URL, src.Category, err))
 			continue
 		}
 		okCount++
-		claimEntries(dnsOwner, ipOwner, catDNS, catIP, &catOrder, seenCat, src.Category, dns, ips)
+		if !res.v.empty() {
+			validators[src.URL] = res.v
+		}
+		srcs = append(srcs, sourceEntries{cat: slot(src.Category), dns: res.dns, ips: res.ips})
+		results[i] = fetched{} // drop our reference; mergeSources releases the rest
 	}
 	for _, custom := range lists.CustomBlocklists {
 		dns, ips := custom.parsedEntries()
@@ -601,36 +768,32 @@ func (s *store) refresh(ctx context.Context) error {
 			continue
 		}
 		okCount++
-		claimEntries(dnsOwner, ipOwner, catDNS, catIP, &catOrder, seenCat, custom.categorySlug(), dns, ips)
+		srcs = append(srcs, sourceEntries{cat: slot(custom.categorySlug()), dns: dns, ips: ips})
 	}
-	if len(dnsOwner)+len(ipOwner) == 0 {
-		if s.cur.Load() != nil {
+	dns, ipv4, ipv6, catAll := mergeSources(srcs, catOrder)
+	if len(dns)+len(ipv4)+len(ipv6) == 0 {
+		if havePrev {
 			return fmt.Errorf("refresh produced no entries (keeping previous lists); failures: %s", strings.Join(failures, "; "))
 		}
 		return fmt.Errorf("refresh produced no entries; failures: %s", strings.Join(failures, "; "))
 	}
-
-	dns := make([]string, 0, len(dnsOwner))
-	for e := range dnsOwner {
-		dns = append(dns, e)
-	}
-	ips := make([]string, 0, len(ipOwner))
-	for e := range ipOwner {
-		ips = append(ips, e)
-	}
-	sortIPs(ips)
-	ipv4, ipv6 := splitByIPFamily(ips)
-	catAll := catAllFromSets(catOrder, catDNS, catIP)
 	allowAll := catAllFromSets(allowOrder, allowDNS, allowIP)
 
-	s.cur.Store(s.buildSnapshot(dns, ipv4, ipv6, catAll, catOrder, allowAll, allowOrder, okCount, time.Now()))
+	s.mu.Lock()
+	snap := s.buildSnapshot(dns, ipv4, ipv6, catAll, catOrder, allowAll, allowOrder, okCount, time.Now())
+	s.cur.Store(snap)
+	s.mu.Unlock()
+	s.validators, s.failed, s.listsSig = validators, failed, listsSig
+
 	for _, f := range failures {
 		log.Printf("source failed (others still applied): %s", f)
 	}
-	snap := s.cur.Load()
 	log.Printf("refreshed: %d DNS + %d IPv4 + %d IPv6 unique entries from %d source(s) (%d block categor(ies), %d allowlist(s)) -> %d/%d/%d chunk(s) of <= %d (%d withheld)",
 		len(dns), len(ipv4), len(ipv6), okCount, len(snap.categories), len(snap.allowlists),
 		len(snap.dnsChunks), len(snap.ipv4Chunks), len(snap.ipv6Chunks), s.cfg.chunkSize, snap.excluded)
+	// The transient parse/sort buffers dwarf the published snapshot; hand
+	// them back to the OS instead of leaving them as idle RSS.
+	debug.FreeOSMemory()
 	return nil
 }
 
