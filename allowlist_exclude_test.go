@@ -7,10 +7,10 @@ import (
 
 func TestWithholdExclusionListFromBlocks(t *testing.T) {
 	cases := []struct {
-		name             string
-		outputAllowlist  bool
-		alsoExcludes     bool
-		wantWithhold     bool
+		name            string
+		outputAllowlist bool
+		alsoExcludes    bool
+		wantWithhold    bool
 	}{
 		{"pure exclusion", false, false, true},
 		{"pure exclusion ignores toggle", false, true, true},
@@ -44,7 +44,7 @@ func TestEnvBool(t *testing.T) {
 
 func TestAllowlistAlsoExcludesFiltersBlockSnapshot(t *testing.T) {
 	st := &store{
-		cfg: config{chunkSize: 100, allowlistAlsoExcludes: true},
+		cfg:     config{chunkSize: 100, allowlistAlsoExcludes: true},
 		listDNS: map[string]struct{}{"school.edu": {}},
 	}
 	dnsAll := []string{"ads.example.com", "school.edu"}

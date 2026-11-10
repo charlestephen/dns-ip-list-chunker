@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 
 Performance release. Output is byte-identical to 1.4.0 for the same inputs
 (verified on 26 real-world sources: 1.28M domains and 496k IPs, every chunk
@@ -34,6 +34,9 @@ stream and category).
   queueing a duplicate.
 - `/stats` `updated_at` is the time the lists last changed upstream, not the
   time of the last check.
+- CI: formatting, `go vet` and `go test -race` now run before the image build,
+  every GitHub Action is pinned to a full commit SHA, and checkout no longer
+  persists credentials.
 
 ## 1.4.0
 
