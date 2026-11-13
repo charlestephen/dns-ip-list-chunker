@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.6.0
+
+- **AdGuard syntax:** `|http://x|` and `|x^` forms parse; `$important` is a
+  plain block; rules with any other modifier are dropped. Cosmetic rules
+  (`example.org##.ad`, `#@#`, `#?#`, `#$#`, `#%#`) are ignored; they used to
+  turn `example.org` into a block entry. `@@` allow rules are no longer
+  discarded: they count in exclusion lists and allowlists and are ignored in
+  blocklists.
+- **IP deduplication:** `1.2.3.4`, `1.2.3.4/32` and `::ffff:1.2.3.4` are one
+  entry (`1.2.3.4`), and IPv4-mapped CIDRs move to the IPv4 stream.
+- **Allowlists from a URL:** `exclusion_lists` entries accept `url:` (any
+  supported format). A failed fetch keeps the last good copy, and a change to
+  only that URL republishes without re-parsing the blocklists.
+- **Published exclusions:** `EXCLUSIONS_URLS` entries are served as the
+  `remote` allowlist and `/manage` entries as the `manual` allowlist. They are
+  still always withheld from block feeds.
+- **Merged allowlist:** `/allowlists/dns-<n>.txt`, `ipv4-<n>.txt` and
+  `ipv6-<n>.txt` serve every allowlist deduplicated and sorted; `/stats` gains
+  `allowlist_all` and `/` lists the feed.
+
 ## 1.5.0
 
 Performance release. Output is byte-identical to 1.4.0 for the same inputs

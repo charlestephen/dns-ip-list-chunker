@@ -34,7 +34,8 @@ const managePage = `<!DOCTYPE html>
 <h1>Blocklist search &amp; remove</h1>
 <p>Removals are exact-match exclusions: they are persisted, re-applied on
 every refresh, and never edit upstream lists. Restoring re-serves an entry
-immediately if an upstream list still contains it.</p>
+immediately if an upstream list still contains it. Removed entries are also
+published as the <code>manual</code> allowlist.</p>
 <form id="searchForm">
   <input type="text" id="q" placeholder="example.com or 1.2.3.4 or 10.0.0.0/8" required>
   <button type="submit">Search</button>

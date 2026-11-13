@@ -163,6 +163,13 @@ type snapshot struct {
 	// allowlists on a DNS server / router). Not filtered by exclusions.
 	allowlists     map[string]*categorySnap
 	allowlistOrder []string
+	// allowlistAll is every published allowlist merged, deduplicated and
+	// sorted; nil when no allowlist has entries. allowSrc is the LISTS_FILE
+	// part of allowlists as supplied to buildSnapshot, kept so an exclusion
+	// edit can rebuild without refetching.
+	allowlistAll  *categorySnap
+	allowSrc      map[string]*categorySnap
+	allowSrcOrder []string
 }
 
 type store struct {
@@ -191,7 +198,12 @@ type store struct {
 	validators map[string]validator
 	failed     map[string]bool
 	listsSig   string
+	// listURLCache holds the last good copy of each exclusion_lists url, so
+	// a failed fetch keeps the previous entries.
+	listURLCache map[string]urlEntries
 }
+
+type urlEntries struct{ dns, ips []string }
 
 // validator is the HTTP cache validators a source returned.
 type validator struct{ etag, lastModified string }
@@ -348,21 +360,7 @@ func (s *store) buildSnapshot(dnsAll, ipv4All, ipv6All []string, catAll map[stri
 		order = append(order, name)
 	}
 
-	allowlists := map[string]*categorySnap{}
-	var aOrder []string
-	for _, name := range allowOrder {
-		src, ok := allowAll[name]
-		if !ok {
-			continue
-		}
-		cat := &categorySnap{dnsAll: src.dnsAll, ipv4All: src.ipv4All, ipv6All: src.ipv6All}
-		finishAllowlist(cat, s.cfg.chunkSize)
-		if cat.dnsCount+cat.ipv4Count+cat.ipv6Count == 0 {
-			continue
-		}
-		allowlists[name] = cat
-		aOrder = append(aOrder, name)
-	}
+	allowlists, aOrder, allowlistAll := s.publishAllowlists(allowAll, allowOrder)
 
 	return &snapshot{
 		dnsAll:         dnsAll,
@@ -385,19 +383,99 @@ func (s *store) buildSnapshot(dnsAll, ipv4All, ipv6All []string, catAll map[stri
 		categoryOrder:  order,
 		allowlists:     allowlists,
 		allowlistOrder: aOrder,
+		allowlistAll:   allowlistAll,
+		allowSrc:       allowAll,
+		allowSrcOrder:  allowOrder,
 	}
+}
+
+// publishAllowlists builds the published allowlist feeds: the LISTS_FILE
+// lists (allowAll), "remote" for EXCLUSIONS_URLS, "manual" for /manage and
+// POST /exclusions entries, plus one merged feed across all of them.
+func (s *store) publishAllowlists(allowAll map[string]*categorySnap, allowOrder []string) (map[string]*categorySnap, []string, *categorySnap) {
+	dnsSets := map[string]map[string]struct{}{}
+	ipSets := map[string]map[string]struct{}{}
+	var order []string
+	add := func(name string, dns, ips []string) {
+		if len(dns)+len(ips) == 0 {
+			return
+		}
+		if dnsSets[name] == nil {
+			dnsSets[name], ipSets[name] = map[string]struct{}{}, map[string]struct{}{}
+			order = append(order, name)
+		}
+		for _, e := range dns {
+			dnsSets[name][e] = struct{}{}
+		}
+		for _, e := range ips {
+			ipSets[name][e] = struct{}{}
+		}
+	}
+	for _, name := range allowOrder {
+		if c := allowAll[name]; c != nil {
+			add(name, c.dnsAll, append(append([]string(nil), c.ipv4All...), c.ipv6All...))
+		}
+	}
+	keys := func(m map[string]struct{}) []string {
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		return out
+	}
+	ud, ui := s.urlExclusionSets()
+	add("remote", keys(ud), keys(ui))
+	if s.excl != nil {
+		md, mi := s.excl.sets()
+		add("manual", keys(md), keys(mi))
+	}
+
+	feeds := catAllFromSets(order, dnsSets, ipSets)
+	merged := map[string]struct{}{}
+	mergedIP := map[string]struct{}{}
+	var feedOrder []string
+	for _, name := range order {
+		cat := feeds[name]
+		if cat == nil {
+			continue
+		}
+		finishAllowlist(cat, s.cfg.chunkSize)
+		feedOrder = append(feedOrder, name)
+		for e := range dnsSets[name] {
+			merged[e] = struct{}{}
+		}
+		for e := range ipSets[name] {
+			mergedIP[e] = struct{}{}
+		}
+	}
+	var all *categorySnap
+	if len(feedOrder) > 0 {
+		all = catAllFromSets([]string{"all"}, map[string]map[string]struct{}{"all": merged}, map[string]map[string]struct{}{"all": mergedIP})["all"]
+		finishAllowlist(all, s.cfg.chunkSize)
+	}
+	return feeds, feedOrder, all
 }
 
 // rebuild re-derives the served chunks from the current snapshot's full
 // entries after an exclusion change. No-op when nothing is loaded yet.
 func (s *store) rebuild() {
+	s.rebuildWith(nil, nil, false)
+}
+
+// rebuildWith re-derives the snapshot; when replaceAllow is set the LISTS_FILE
+// allowlists are replaced by allowAll/allowOrder, otherwise the current ones
+// are kept.
+func (s *store) rebuildWith(allowAll map[string]*categorySnap, allowOrder []string, replaceAllow bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap := s.cur.Load()
 	if snap == nil {
 		return
 	}
-	s.cur.Store(s.buildSnapshot(snap.dnsAll, snap.ipv4All, snap.ipv6All, snap.categories, snap.categoryOrder, snap.allowlists, snap.allowlistOrder, snap.sourcesOK, snap.updatedAt))
+	if !replaceAllow {
+		allowAll, allowOrder = snap.allowSrc, snap.allowSrcOrder
+	}
+	s.cur.Store(s.buildSnapshot(snap.dnsAll, snap.ipv4All, snap.ipv6All, snap.categories, snap.categoryOrder, allowAll, allowOrder, snap.sourcesOK, snap.updatedAt))
 }
 
 func chunkStrings(entries []string, size int) [][]string {
@@ -411,6 +489,7 @@ func chunkStrings(entries []string, size int) [][]string {
 // fetched is the result of one source download.
 type fetched struct {
 	dns, ips    []string
+	adns, aips  []string // AdGuard allow rules (@@)
 	v           validator
 	notModified bool
 }
@@ -423,7 +502,7 @@ func (s *store) fetch(ctx context.Context, url string, prev *validator) (fetched
 	if err != nil {
 		return fetched{}, err
 	}
-	req.Header.Set("User-Agent", "dns-ip-list-chunker/1.4")
+	req.Header.Set("User-Agent", "dns-ip-list-chunker/1.6")
 	if prev != nil {
 		if prev.etag != "" {
 			req.Header.Set("If-None-Match", prev.etag)
@@ -450,16 +529,44 @@ func (s *store) fetch(ctx context.Context, url string, prev *validator) (fetched
 	if _, err := io.Copy(&buf, io.LimitReader(resp.Body, s.cfg.fetchLimit)); err != nil {
 		return fetched{}, err
 	}
-	dns, ips, err := parseList(url, resp.Header.Get("Content-Type"), buf.Bytes())
+	c, err := parseClassified(url, resp.Header.Get("Content-Type"), buf.Bytes())
 	if err != nil {
 		return fetched{}, err
 	}
-	return fetched{dns: dns, ips: ips, v: validator{resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")}}, nil
+	return fetched{dns: c.dns, ips: c.ips, adns: c.aDNS, aips: c.aIPs, v: validator{resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")}}, nil
 }
 
+// fetchOne downloads a list used as an exclusion or allowlist, where every
+// entry (including AdGuard @@ rules) is an allowed one.
 func (s *store) fetchOne(ctx context.Context, url string) (dns, ips []string, err error) {
 	f, err := s.fetch(ctx, url, nil)
-	return f.dns, f.ips, err
+	return append(f.dns, f.adns...), append(f.ips, f.aips...), err
+}
+
+func toSet(entries []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		m[e] = struct{}{}
+	}
+	return m
+}
+
+// fetchListURL fetches one exclusion_lists url. A failure keeps the last good
+// copy. It reports whether the entries differ from the previous copy.
+func (s *store) fetchListURL(ctx context.Context, url string) (dns, ips []string, changed bool) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	d, i, err := s.fetchOne(fetchCtx, url)
+	prev, had := s.listURLCache[url]
+	if err != nil {
+		log.Printf("allowlist source failed (keeping previous copy): %s: %v", url, err)
+		return prev.dns, prev.ips, false
+	}
+	if s.listURLCache == nil {
+		s.listURLCache = map[string]urlEntries{}
+	}
+	s.listURLCache[url] = urlEntries{d, i}
+	return d, i, !had || !sameSet(toSet(d), toSet(prev.dns)) || !sameSet(toSet(i), toSet(prev.ips))
 }
 
 func sameSet(a, b map[string]struct{}) bool {
@@ -659,8 +766,14 @@ func (s *store) refreshLocked(ctx context.Context) error {
 	allowIP := make(map[string]map[string]struct{})
 	var allowOrder []string
 	seenAllow := make(map[string]bool)
+	listURLChanged := false
 	for _, excl := range lists.ExclusionLists {
-		dns, ips := excl.parsedEntries()
+		dns, ips := excl.parsedAllowEntries()
+		if excl.URL != "" {
+			ud, ui, ch := s.fetchListURL(ctx, excl.URL)
+			dns, ips = append(dns, ud...), append(ips, ui...)
+			listURLChanged = listURLChanged || ch
+		}
 		if withholdExclusionListFromBlocks(excl.OutputAllowlist, s.cfg.allowlistAlsoExcludes) {
 			for _, e := range dns {
 				listDNS[e] = struct{}{}
@@ -716,8 +829,9 @@ func (s *store) refreshLocked(ctx context.Context) error {
 		}
 	}
 	if allUnchanged {
-		if exclChanged {
-			s.rebuild() // only the remote exclusion set moved: re-filter, no re-sort
+		if exclChanged || listURLChanged {
+			// only an exclusion or allowlist moved: re-filter, no re-sort
+			s.rebuildWith(catAllFromSets(allowOrder, allowDNS, allowIP), allowOrder, true)
 			log.Printf("refresh: sources unchanged; re-applied updated exclusion lists")
 		} else {
 			log.Printf("refresh: no upstream changes (%d source(s) unchanged); keeping current lists", len(s.cfg.sources))

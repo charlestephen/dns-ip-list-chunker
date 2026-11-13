@@ -10,19 +10,33 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 
 1. Sources come from `BLOCKLIST_URLS` (optional `category:https://…` tags) and/or
    inline `custom_blocklists` in `LISTS_FILE`. Formats: **txt**, **hosts**,
-   **adblock**, **JSON**, **YAML**, **TOML**, **CSV**. Line comments (`#`,
-   `//`, `--`, `;`) strip only at line start or after whitespace so labels
-   like `xn--…` and `o--o.example` survive; CIDRs keep a single `/`.
+   **AdGuard/adblock**, **JSON**, **YAML**, **TOML**, **CSV**. Line comments
+   (`#`, `//`, `--`, `;`) strip only at line start or after whitespace so
+   labels like `xn--…` and `o--o.example` survive; CIDRs keep a single `/`.
+   AdGuard syntax: `||example.org^` and `|http://example.org|` block;
+   `$important` is accepted; rules with any other modifier (`$third-party`,
+   `$dnsrewrite`, `$client=`, …) are dropped; cosmetic rules
+   (`example.org##.ad`, `#@#`, `#?#`, `#$#`, `#%#`) are ignored; `@@` allow
+   rules count only where entries are allowed ones (exclusion lists and
+   allowlists) and are ignored in blocklists.
 2. Entries are normalized and classified as **domains**, **IPv4**, or **IPv6**.
+   `1.2.3.4`, `1.2.3.4/32` and `::ffff:1.2.3.4` are one entry (written
+   `1.2.3.4`); CIDRs are masked to the network address.
 3. Deduplicated entries join the global **all** feed and exactly **one** block
    category (first source wins). Feeds are sorted and split into chunks of at
    most `CHUNK_SIZE`.
 4. `exclusion_lists` in `LISTS_FILE` (and `EXCLUSIONS_URLS` / `/manage`) withhold
-   matches from block feeds when they are pure exclusions. Lists with
+   matches from block feeds when they are pure exclusions. An exclusion list
+   takes inline `entries`, a `url` (any supported format), or both. Lists with
    `output_allowlist: true` publish `/allowlists/<category>/…` for routers/DNS
    that subscribe to allowlists; those entries are stripped from block feeds
    only when `ALLOWLIST_ALSO_EXCLUDES=true` (default off — so you can apply
    allow feeds to some clients while leaving the global blocklist intact).
+   `EXCLUSIONS_URLS` entries are also published as the `remote` allowlist and
+   `/manage` / `POST /exclusions` entries as the `manual` allowlist; both are
+   always withheld from block feeds. Every allowlist is also merged,
+   deduplicated and sorted into one feed at `/allowlists/dns-<n>.txt`,
+   `ipv4-<n>.txt` and `ipv6-<n>.txt`.
 5. A failed URL source is skipped; other sources still apply.
 
 ## Endpoints
@@ -33,7 +47,8 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 | `GET /lists/dns-<n>.txt` | Global domain chunk |
 | `GET /lists/ipv4-<n>.txt` / `ipv6-<n>.txt` | Global IP chunks |
 | `GET /lists/<category>/dns-<n>.txt` | Category block chunk (also `ipv4` / `ipv6`) |
-| `GET /allowlists/<category>/dns-<n>.txt` | Optional allowlist chunk |
+| `GET /allowlists/dns-<n>.txt` / `ipv4-<n>.txt` / `ipv6-<n>.txt` | All allowlists merged |
+| `GET /allowlists/<category>/dns-<n>.txt` | Allowlist chunk for one category (also `ipv4` / `ipv6`) |
 | `GET /stats` | JSON counts, `categories`, `allowlists` |
 | `GET /search?q=` | Lookup (includes `category` when known) |
 | `GET /manage` | Search / exclude / restore UI (needs `ADMIN_TOKEN`) |
@@ -54,7 +69,7 @@ Formerly `unifi-blocklist-chunker` — same engine, generic naming.
 | `ADMIN_TOKEN` | *(unset)* | no | Gates `/manage` and exclusion mutations (fail-closed if unset). |
 | `EXCLUSIONS_FILE` | `exclusions.json` | no | Internal persistence for `/manage` exclusions (not a seed format). |
 | `EXCLUSIONS_URLS` | *(unset)* | no | Remote exclusion list URLs (same formats as blocklists). |
-| `ALLOWLIST_ALSO_EXCLUDES` | `false` | no | When `true`, entries from `output_allowlist` lists are also withheld from exported block feeds. Default keeps allowlisted entries in blocklists so allow feeds can be applied per-client. |
+| `ALLOWLIST_ALSO_EXCLUDES` | `false` | no | When `true`, entries from `output_allowlist` lists (inline or `url`) are also withheld from exported block feeds. Default keeps allowlisted entries in blocklists so allow feeds can be applied per-client. `EXCLUSIONS_URLS` and `/manage` entries are always withheld. |
 
 ### `LISTS_FILE` example
 
@@ -72,6 +87,10 @@ exclusion_lists:
     entries: |
       school.edu
       10.0.0.0/8
+  - name: shared-allow
+    category: allow-shared
+    output_allowlist: true
+    url: https://example.com/allow.txt
 ```
 
 ### Categories on URLs

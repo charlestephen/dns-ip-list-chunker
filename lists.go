@@ -12,9 +12,12 @@ import (
 // namedList is one inline or file-backed list with a display name, category
 // slug, and newline-separated entries (domains / IPs / CIDRs).
 type namedList struct {
-	Name            string `yaml:"name" json:"name"`
-	Category        string `yaml:"category" json:"category"`
-	Entries         string `yaml:"entries" json:"entries"`
+	Name     string `yaml:"name" json:"name"`
+	Category string `yaml:"category" json:"category"`
+	Entries  string `yaml:"entries" json:"entries"`
+	// URL optionally points at a remote list (any supported format) that is
+	// merged with Entries. Used by exclusion_lists.
+	URL             string `yaml:"url" json:"url"`
 	OutputAllowlist bool   `yaml:"output_allowlist" json:"output_allowlist"`
 }
 
@@ -63,8 +66,18 @@ func (n namedList) categorySlug() string {
 	return defaultCategory
 }
 
+// parsedEntries returns the block entries of a custom blocklist. AdGuard
+// allow rules (@@) in it are ignored.
 func (n namedList) parsedEntries() (dns, ips []string) {
 	var c classifier
 	c.text(n.Entries)
 	return c.dns, c.ips
+}
+
+// parsedAllowEntries returns every entry of an exclusion list, including
+// AdGuard allow rules (@@), since all of them are allowed entries there.
+func (n namedList) parsedAllowEntries() (dns, ips []string) {
+	var c classifier
+	c.text(n.Entries)
+	return c.all()
 }

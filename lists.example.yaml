@@ -9,3 +9,7 @@ exclusion_lists:
     output_allowlist: true
     entries: |
       school.edu
+  - name: shared
+    category: allow-shared
+    output_allowlist: true
+    url: https://example.com/allow.txt
