@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Docker Hub overview:** `docs/dockerhub.md` documents running the image
+  with Docker and Docker Compose, and the container workflow syncs it to
+  `docker.io/charlestephen/dns-ip-list-chunker`.
+
 ## 1.6.0
 
 - **AdGuard syntax:** `|http://x|` and `|x^` forms parse; `$important` is a
